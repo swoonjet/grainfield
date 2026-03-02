@@ -331,6 +331,7 @@
       <div class="add-menu-item" data-type="grain"><span class="item-name">Grain Engine</span><span class="item-desc">granular</span></div>
       <div class="add-menu-item" data-type="reverse"><span class="item-name">Reverse</span><span class="item-desc">backward</span></div>
       <div class="add-menu-item" data-type="grainlab"><span class="item-name">Grain Lab</span><span class="item-desc">multi-grain</span></div>
+      <div class="add-menu-item" data-type="grainchoir"><span class="item-name">Grain Choir</span><span class="item-desc">harmonize</span></div>
       <div class="add-menu-item" data-type="filter"><span class="item-name">Filter</span><span class="item-desc">shape</span></div>
       <div class="add-menu-item" data-type="distortion"><span class="item-name">Distortion</span><span class="item-desc">crunch</span></div>
       <div class="add-menu-item" data-type="bitcrusher"><span class="item-name">Bitcrusher</span><span class="item-desc">lo-fi</span></div>
@@ -495,6 +496,10 @@ var NODE_DEFS = {
     category: 'Process', title: 'Grain Lab', inputs: ['audio'],
     outputs: ['low', 'mid', 'high', 'mix'],
     params: { grainSize: 80, density: 12, scatter: 0.2, shape: 0.3, algorithm: 'spectral', layerSpread: 0.5 }
+  },
+  grainchoir: {
+    category: 'Process', title: 'Grain Choir', inputs: ['audio'], outputs: ['audio'],
+    params: { voices: 4, harmony: 'unison', detune: 0.3, spread: 0.6, grainSize: 100, density: 8, scatter: 0.15, shape: 0.4, warmth: 0.3 }
   },
   mixer: {
     category: 'Utility', title: 'Mixer', inputs: ['audio'], outputs: ['audio'],
@@ -1098,6 +1103,53 @@ function buildNodeAudio(node) {
       timers: [], grainCounter: 0
     };
   }
+  else if (t === 'grainchoir') {
+    var grainInput = audioCtx.createGain();
+    var out = audioCtx.createGain();
+    out.gain.value = 1.0;
+    // Warmth filter (lowpass on output)
+    var warmthFilter = audioCtx.createBiquadFilter();
+    warmthFilter.type = 'lowpass';
+    var warmth = node.params.warmth || 0.3;
+    warmthFilter.frequency.value = 20000 * Math.pow(0.1, warmth);
+    warmthFilter.Q.value = 0.5;
+    out.connect(warmthFilter);
+    // Rolling capture buffer (4 seconds)
+    var captureLen = audioCtx.sampleRate * 4;
+    var captureBuffer = audioCtx.createBuffer(1, captureLen, audioCtx.sampleRate);
+    var captureData = captureBuffer.getChannelData(0);
+    var capturePos = 0;
+    var hasCapture = false;
+    var capturer = audioCtx.createScriptProcessor(2048, 1, 1);
+    capturer.onaudioprocess = function(e) {
+      var inp = e.inputBuffer.getChannelData(0);
+      var outBuf = e.outputBuffer.getChannelData(0);
+      for (var i = 0; i < inp.length; i++) {
+        captureData[capturePos] = inp[i];
+        capturePos = (capturePos + 1) % captureLen;
+        outBuf[i] = 0;
+      }
+      if (!hasCapture) {
+        for (var j = 0; j < inp.length; j++) {
+          if (Math.abs(inp[j]) > 0.001) { hasCapture = true; break; }
+        }
+      }
+    };
+    grainInput.connect(capturer);
+    var silentDest = audioCtx.createGain();
+    silentDest.gain.value = 0;
+    capturer.connect(silentDest);
+    silentDest.connect(audioCtx.destination);
+    node.audio = {
+      type: 'grainchoir', input: grainInput, output: warmthFilter, grainOutput: out,
+      warmthFilter: warmthFilter,
+      captureBuffer: captureBuffer, captureData: captureData, captureLen: captureLen,
+      capturePos: function() { return capturePos; },
+      hasCapture: function() { return hasCapture; },
+      capturer: capturer, silentDest: silentDest,
+      timers: []
+    };
+  }
   else if (t === 'output') {
     var input = audioCtx.createGain();
     input.gain.value = node.params.volume || 0.7;
@@ -1199,6 +1251,14 @@ function destroyNodeAudio(node) {
     try { node.audio.capturer.disconnect(); } catch(e) {}
     try { node.audio.silentDest.disconnect(); } catch(e) {}
     if (node.audio.outputs) node.audio.outputs.forEach(function(o) { try { o.disconnect(); } catch(e) {} });
+    if (node.audio.input) try { node.audio.input.disconnect(); } catch(e) {}
+  }
+  if (node.audio.type === 'grainchoir') {
+    stopChoirGrainEngine(node);
+    try { node.audio.capturer.disconnect(); } catch(e) {}
+    try { node.audio.silentDest.disconnect(); } catch(e) {}
+    try { node.audio.warmthFilter.disconnect(); } catch(e) {}
+    try { node.audio.grainOutput.disconnect(); } catch(e) {}
     if (node.audio.input) try { node.audio.input.disconnect(); } catch(e) {}
   }
   if (node.audio.output) try { node.audio.output.disconnect(); } catch(e) {}
@@ -1661,6 +1721,250 @@ function stopGrainLabEngine(labNode) {
   }
 }
 
+// ─── GRAIN CHOIR ENGINE ───
+function getHarmonyMultipliers(harmony, voices, detune) {
+  var mults = [];
+  for (var v = 0; v < voices; v++) {
+    var base;
+    if (harmony === 'unison') {
+      base = 1.0;
+    } else if (harmony === 'octave') {
+      // Spread voices across octaves: 0.5, 1.0, 2.0, 4.0...
+      var octRange = Math.ceil(voices / 2);
+      var octStep = v - Math.floor(voices / 2);
+      base = Math.pow(2, octStep / Math.max(1, octRange - 1) * 2);
+    } else if (harmony === 'fifth') {
+      // Musical fifths: ratio 3/2 stacked
+      base = Math.pow(1.5, v - Math.floor(voices / 2));
+    } else if (harmony === 'chord') {
+      // Major triad intervals: 1, 5/4, 3/2, 2 cycling
+      var intervals = [1.0, 5/4, 3/2, 2.0, 5/2, 3.0, 4.0, 5.0];
+      base = intervals[v % intervals.length];
+    } else if (harmony === 'drift') {
+      // Random interval per voice
+      base = 0.5 + Math.random() * 3.0;
+    } else {
+      base = 1.0;
+    }
+    // Apply detune: random pitch drift around the base
+    var detuneAmount = 1.0 + (Math.random() * 2 - 1) * detune * 0.05;
+    mults.push(base * detuneAmount);
+  }
+  return mults;
+}
+
+function spawnChoirGrain(srcNode, choirNode) {
+  if (!audioCtx || !isPlaying) return;
+  if (!choirNode.audio || !choirNode.audio.grainOutput) return;
+  var now = audioCtx.currentTime;
+  var voices = Math.round(choirNode.params.voices || 4);
+  var harmony = choirNode.params.harmony || 'unison';
+  var detune = choirNode.params.detune || 0.3;
+  var spread = choirNode.params.spread || 0.6;
+  var sizeSec = (choirNode.params.grainSize || 100) / 1000;
+  var scatter = choirNode.params.scatter || 0.15;
+  var shape = choirNode.params.shape || 0.4;
+
+  var attRatio = Math.max(0.01, shape);
+  var relRatio = Math.max(0.01, 1 - shape);
+  var att = sizeSec * attRatio;
+  var rel = sizeSec * relRatio;
+  var peakBoost = 1.0 + 0.4 * Math.sin(shape * Math.PI);
+  var mults = getHarmonyMultipliers(harmony, voices, detune);
+
+  for (var v = 0; v < voices; v++) {
+    var pitchMult = mults[v];
+    // Stereo pan distributed across [-spread, +spread]
+    var panVal = voices > 1 ? -spread + (2 * spread * v / (voices - 1)) : 0;
+    // Tiny time offset for humanized stagger
+    var timeOffset = v * 0.003 * Math.random();
+    var startTime = now + timeOffset;
+    var peak = (0.25 / Math.sqrt(voices)) * peakBoost;
+
+    if (srcNode.type === 'oscillator') {
+      var pitch = srcNode.params.pitch || 220;
+      var scatterRange = pitch * scatter * 0.5;
+      var freq = (pitch + (Math.random() * 2 - 1) * scatterRange) * pitchMult;
+      freq = Math.max(20, Math.min(freq, 20000));
+      var osc = audioCtx.createOscillator();
+      osc.type = srcNode.params.waveform || 'sine';
+      osc.frequency.value = freq;
+      var env = audioCtx.createGain();
+      var panner = audioCtx.createStereoPanner();
+      panner.pan.value = panVal;
+      env.gain.setValueAtTime(0.0001, startTime);
+      if (shape < 0.3) {
+        env.gain.linearRampToValueAtTime(peak, startTime + att);
+        env.gain.exponentialRampToValueAtTime(0.0001, startTime + att + rel);
+      } else if (shape > 0.7) {
+        env.gain.exponentialRampToValueAtTime(peak, startTime + att);
+        env.gain.linearRampToValueAtTime(0.0001, startTime + att + rel);
+      } else {
+        env.gain.linearRampToValueAtTime(peak, startTime + att);
+        env.gain.linearRampToValueAtTime(0.0001, startTime + att + rel);
+      }
+      osc.connect(env);
+      env.connect(panner);
+      panner.connect(choirNode.audio.grainOutput);
+      osc.start(startTime);
+      osc.stop(startTime + sizeSec + 0.02);
+      osc.onended = (function(o, e, p) { return function() { o.disconnect(); e.disconnect(); p.disconnect(); }; })(osc, env, panner);
+    }
+    else if (srcNode.type === 'noise' && srcNode.audio && srcNode.audio.buffer) {
+      var bufSrc = audioCtx.createBufferSource();
+      bufSrc.buffer = srcNode.audio.buffer;
+      var startPos = Math.random() * Math.max(0, srcNode.audio.buffer.duration - sizeSec);
+      bufSrc.playbackRate.value = pitchMult;
+      var env = audioCtx.createGain();
+      var panner = audioCtx.createStereoPanner();
+      panner.pan.value = panVal;
+      var nPeak = (srcNode.params.level || 0.5) * 0.5 * peakBoost / Math.sqrt(voices);
+      env.gain.setValueAtTime(0.0001, startTime);
+      if (shape < 0.3) {
+        env.gain.linearRampToValueAtTime(nPeak, startTime + att);
+        env.gain.exponentialRampToValueAtTime(0.0001, startTime + att + rel);
+      } else if (shape > 0.7) {
+        env.gain.exponentialRampToValueAtTime(nPeak, startTime + att);
+        env.gain.linearRampToValueAtTime(0.0001, startTime + att + rel);
+      } else {
+        env.gain.linearRampToValueAtTime(nPeak, startTime + att);
+        env.gain.linearRampToValueAtTime(0.0001, startTime + att + rel);
+      }
+      bufSrc.connect(env);
+      env.connect(panner);
+      panner.connect(choirNode.audio.grainOutput);
+      bufSrc.start(startTime, startPos, sizeSec + 0.02);
+      bufSrc.onended = (function(b, e, p) { return function() { b.disconnect(); e.disconnect(); p.disconnect(); }; })(bufSrc, env, panner);
+    }
+    else if (srcNode.type === 'sampler' && srcNode.audio && srcNode.audio.sampleBuffer) {
+      var buf = srcNode.audio.sampleBuffer;
+      var trimS = (srcNode.params.trimStart || 0) * buf.duration;
+      var trimE = (srcNode.params.trimEnd || 1) * buf.duration;
+      var trimRange = Math.max(0.01, trimE - trimS);
+      var startPos = trimS + Math.random() * Math.max(0, trimRange - sizeSec);
+      var rate = (srcNode.params.playbackRate || 1.0) * pitchMult;
+      var scatterRange = rate * scatter * 0.5;
+      rate += (Math.random() * 2 - 1) * scatterRange;
+      rate = Math.max(0.1, Math.min(rate, 4.0));
+      var bufSrc = audioCtx.createBufferSource();
+      bufSrc.buffer = buf;
+      bufSrc.playbackRate.value = rate;
+      var env = audioCtx.createGain();
+      var panner = audioCtx.createStereoPanner();
+      panner.pan.value = panVal;
+      var sPeak = 0.35 * peakBoost / Math.sqrt(voices);
+      env.gain.setValueAtTime(0.0001, startTime);
+      if (shape < 0.3) {
+        env.gain.linearRampToValueAtTime(sPeak, startTime + att);
+        env.gain.exponentialRampToValueAtTime(0.0001, startTime + att + rel);
+      } else if (shape > 0.7) {
+        env.gain.exponentialRampToValueAtTime(sPeak, startTime + att);
+        env.gain.linearRampToValueAtTime(0.0001, startTime + att + rel);
+      } else {
+        env.gain.linearRampToValueAtTime(sPeak, startTime + att);
+        env.gain.linearRampToValueAtTime(0.0001, startTime + att + rel);
+      }
+      bufSrc.connect(env);
+      env.connect(panner);
+      panner.connect(choirNode.audio.grainOutput);
+      bufSrc.start(startTime, startPos, sizeSec / rate + 0.02);
+      bufSrc.onended = (function(b, e, p) { return function() { b.disconnect(); e.disconnect(); p.disconnect(); }; })(bufSrc, env, panner);
+    }
+  }
+}
+
+function spawnBufferChoirGrain(choirNode) {
+  if (!audioCtx || !isPlaying) return;
+  if (!choirNode.audio || !choirNode.audio.grainOutput) return;
+  if (!choirNode.audio.hasCapture()) return;
+  var now = audioCtx.currentTime;
+  var voices = Math.round(choirNode.params.voices || 4);
+  var harmony = choirNode.params.harmony || 'unison';
+  var detune = choirNode.params.detune || 0.3;
+  var spread = choirNode.params.spread || 0.6;
+  var sizeSec = (choirNode.params.grainSize || 100) / 1000;
+  var scatter = choirNode.params.scatter || 0.15;
+  var shape = choirNode.params.shape || 0.4;
+  var sizeFrames = Math.floor(sizeSec * audioCtx.sampleRate);
+  var captureLen = choirNode.audio.captureLen;
+  var captureData = choirNode.audio.captureData;
+  var writePos = choirNode.audio.capturePos();
+
+  var maxOffset = Math.min(captureLen - sizeFrames, captureLen * 0.9);
+  var readOffset = Math.floor(Math.random() * maxOffset);
+  var readStart = (writePos - sizeFrames - readOffset + captureLen * 2) % captureLen;
+  var grainBuf = audioCtx.createBuffer(1, sizeFrames, audioCtx.sampleRate);
+  var grainData = grainBuf.getChannelData(0);
+  for (var i = 0; i < sizeFrames; i++) {
+    grainData[i] = captureData[(readStart + i) % captureLen];
+  }
+
+  var attRatio = Math.max(0.01, shape);
+  var relRatio = Math.max(0.01, 1 - shape);
+  var att = sizeSec * attRatio;
+  var rel = sizeSec * relRatio;
+  var peakBoost = 1.0 + 0.4 * Math.sin(shape * Math.PI);
+  var mults = getHarmonyMultipliers(harmony, voices, detune);
+
+  for (var v = 0; v < voices; v++) {
+    var pitchMult = mults[v];
+    var panVal = voices > 1 ? -spread + (2 * spread * v / (voices - 1)) : 0;
+    var timeOffset = v * 0.003 * Math.random();
+    var startTime = now + timeOffset;
+    var rate = pitchMult + (Math.random() * 2 - 1) * scatter * 0.5;
+    rate = Math.max(0.25, Math.min(rate, 4.0));
+    var peak = (0.4 / Math.sqrt(voices)) * peakBoost;
+
+    var src = audioCtx.createBufferSource();
+    src.buffer = grainBuf;
+    src.playbackRate.value = rate;
+    var env = audioCtx.createGain();
+    var panner = audioCtx.createStereoPanner();
+    panner.pan.value = panVal;
+    env.gain.setValueAtTime(0.0001, startTime);
+    if (shape < 0.3) {
+      env.gain.linearRampToValueAtTime(peak, startTime + att);
+      env.gain.exponentialRampToValueAtTime(0.0001, startTime + att + rel);
+    } else if (shape > 0.7) {
+      env.gain.exponentialRampToValueAtTime(peak, startTime + att);
+      env.gain.linearRampToValueAtTime(0.0001, startTime + att + rel);
+    } else {
+      env.gain.linearRampToValueAtTime(peak, startTime + att);
+      env.gain.linearRampToValueAtTime(0.0001, startTime + att + rel);
+    }
+    src.connect(env);
+    env.connect(panner);
+    panner.connect(choirNode.audio.grainOutput);
+    src.start(startTime);
+    src.stop(startTime + sizeSec / rate + 0.02);
+    src.onended = (function(s, e, p) { return function() { s.disconnect(); e.disconnect(); p.disconnect(); }; })(src, env, panner);
+  }
+}
+
+function startChoirGrainEngine(srcNode, choirNode) {
+  var density = choirNode.params.density || 8;
+  var interval = 1000 / density;
+  var timerId = setInterval(function() { spawnChoirGrain(srcNode, choirNode); }, interval);
+  if (!choirNode.audio.timers) choirNode.audio.timers = [];
+  choirNode.audio.timers.push({ srcId: srcNode.id, timer: timerId });
+}
+
+function startBufferChoirGrainEngine(choirNode) {
+  var density = choirNode.params.density || 8;
+  var interval = 1000 / density;
+  var timerId = setInterval(function() { spawnBufferChoirGrain(choirNode); }, interval);
+  if (!choirNode.audio.timers) choirNode.audio.timers = [];
+  choirNode.audio.timers.push({ srcId: 'buffer', timer: timerId });
+}
+
+function stopChoirGrainEngine(choirNode) {
+  if (!choirNode.audio) return;
+  if (choirNode.audio.timers) {
+    choirNode.audio.timers.forEach(function(t) { clearInterval(t.timer); });
+    choirNode.audio.timers = [];
+  }
+}
+
 function startNoiseSource(node) {
   if (!node.audio || node.audio.type !== 'noise') return;
   if (node.audio.sourceNode) {
@@ -1698,6 +2002,7 @@ function connectAudio() {
     if (!n.audio) return;
     if (n.audio.type === 'grain') stopGrainEngine(n);
     if (n.audio.type === 'grainlab') stopGrainLabEngine(n);
+    if (n.audio.type === 'grainchoir') stopChoirGrainEngine(n);
     if (n.audio.type === 'noise') stopNoiseSource(n);
     if (n.audio.type === 'oscillator') stopOscSource(n);
     if (n.audio.type === 'sampler') stopSamplerSource(n);
@@ -1715,9 +2020,10 @@ function connectAudio() {
   var samplerNeedStart = {};
   var grainNeedBuffer = {};
   var grainlabNeedBuffer = {};
+  var grainchoirNeedBuffer = {};
   var reverseNeedStart = {};
 
-  var isGrainLike = function(t) { return t === 'grain' || t === 'grainlab'; };
+  var isGrainLike = function(t) { return t === 'grain' || t === 'grainlab' || t === 'grainchoir'; };
   var isSource = function(t) { return t === 'oscillator' || t === 'noise' || t === 'sampler'; };
 
   wires.forEach(function(w) {
@@ -1733,8 +2039,10 @@ function connectAudio() {
       if (isPlaying) startGrainEngine(fn, tn);
     }
     if ((fn.type === 'oscillator' || fn.type === 'noise') && tn.type === 'grainlab') {
-      // Grain Lab uses buffer-based spawning, but also spawns from source params
       if (isPlaying) startGrainLabEngine(fn, tn);
+    }
+    if ((fn.type === 'oscillator' || fn.type === 'noise') && tn.type === 'grainchoir') {
+      if (isPlaying) startChoirGrainEngine(fn, tn);
     }
     // Sampler → Grain: spawn grains from sampler buffer
     if (fn.type === 'sampler' && tn.type === 'grain') {
@@ -1744,6 +2052,10 @@ function connectAudio() {
     if (fn.type === 'sampler' && tn.type === 'grainlab') {
       samplerNeedStart[fn.id] = true;
       if (isPlaying && fn.audio.sampleBuffer) startGrainLabEngine(fn, tn);
+    }
+    if (fn.type === 'sampler' && tn.type === 'grainchoir') {
+      samplerNeedStart[fn.id] = true;
+      if (isPlaying && fn.audio.sampleBuffer) startChoirGrainEngine(fn, tn);
     }
 
     // Any node → Grain (non source): wire audio into grain's capture input
@@ -1755,6 +2067,11 @@ function connectAudio() {
     if (!isSource(fn.type) && tn.type === 'grainlab' && tn.audio.input) {
       try { fromOutput.connect(tn.audio.input); } catch(e) {}
       grainlabNeedBuffer[tn.id] = true;
+    }
+    // Any node → GrainChoir (non source): wire audio into grainchoir's capture input
+    if (!isSource(fn.type) && tn.type === 'grainchoir' && tn.audio.input) {
+      try { fromOutput.connect(tn.audio.input); } catch(e) {}
+      grainchoirNeedBuffer[tn.id] = true;
     }
 
     // Source → Grain: also wire direct audio for capture
@@ -1809,6 +2126,7 @@ function connectAudio() {
       if (n.type === 'sampler' && samplerNeedStart[n.id]) startSamplerSource(n);
       if (n.type === 'grain' && grainNeedBuffer[n.id]) startBufferGrainEngine(n);
       if (n.type === 'grainlab' && grainlabNeedBuffer[n.id]) startBufferGrainLabEngine(n);
+      if (n.type === 'grainchoir' && grainchoirNeedBuffer[n.id]) startBufferChoirGrainEngine(n);
       if (n.type === 'reverse' && reverseNeedStart[n.id]) startReverseEngine(n);
     });
   }
@@ -1885,6 +2203,7 @@ function togglePlay() {
     nodes.forEach(function(n) {
       if (n.audio && n.audio.type === 'grain') stopGrainEngine(n);
       if (n.audio && n.audio.type === 'grainlab') stopGrainLabEngine(n);
+      if (n.audio && n.audio.type === 'grainchoir') stopChoirGrainEngine(n);
       if (n.audio && n.audio.type === 'noise') stopNoiseSource(n);
       if (n.audio && n.audio.type === 'oscillator') stopOscSource(n);
       if (n.audio && n.audio.type === 'sampler') stopSamplerSource(n);
@@ -2084,6 +2403,17 @@ function renderNode(node) {
     html += slider(node, 'shape', 'Shape', 0.01, 0.99, 0.01, 'f2');
     html += slider(node, 'layerSpread', 'Spread', 0, 1, 0.01, 'f2');
   }
+  else if (node.type === 'grainchoir') {
+    html += waveButtons(node, ['unison','octave','fifth','chord','drift'], ['Unison','Octave','Fifth','Chord','Drift'], 'harmony');
+    html += slider(node, 'voices', 'Voices', 2, 8, 1, 'i');
+    html += slider(node, 'detune', 'Detune', 0, 1, 0.01, 'f2');
+    html += slider(node, 'spread', 'Spread', 0, 1, 0.01, 'f2');
+    html += slider(node, 'grainSize', 'Size', 5, 400, 1, 'ms');
+    html += slider(node, 'density', 'Density', 1, 60, 1, 'ps');
+    html += slider(node, 'scatter', 'Scatter', 0, 1, 0.01, 'f2');
+    html += slider(node, 'shape', 'Shape', 0.01, 0.99, 0.01, 'f2');
+    html += slider(node, 'warmth', 'Warmth', 0, 1, 0.01, 'f2');
+  }
   else if (node.type === 'output') {
     html += slider(node, 'volume', 'Volume', 0, 1, 0.01, 'f2');
   }
@@ -2196,6 +2526,10 @@ function renderNode(node) {
         }
         if (paramName === 'algorithm') {
           // Grain Lab algorithm change — just store param, takes effect on next grain
+        }
+        if (paramName === 'harmony' && node.audio && node.audio.type === 'grainchoir') {
+          // Harmony change — restart engine to apply new intervals
+          connectAudio();
         }
       }
     });
@@ -2325,6 +2659,13 @@ function renderNode(node) {
         // Grain Lab
         if (node.audio.type === 'grainlab') {
           if (param === 'density') connectAudio();
+        }
+        // Grain Choir
+        if (node.audio.type === 'grainchoir') {
+          if (param === 'voices' || param === 'density') connectAudio();
+          if (param === 'warmth' && node.audio.warmthFilter) {
+            node.audio.warmthFilter.frequency.setTargetAtTime(20000 * Math.pow(0.1, val), audioCtx.currentTime, 0.05);
+          }
         }
       }
       scheduleAutoSave();
@@ -2588,6 +2929,7 @@ canvasEl.addEventListener('contextmenu', function(e) {
       { label: 'Grain Engine', action: function() { createNode('grain', cp.x, cp.y); }},
       { label: 'Reverse', action: function() { createNode('reverse', cp.x, cp.y); }},
       { label: 'Grain Lab', action: function() { createNode('grainlab', cp.x, cp.y); }},
+      { label: 'Grain Choir', action: function() { createNode('grainchoir', cp.x, cp.y); }},
       { label: 'Filter', action: function() { createNode('filter', cp.x, cp.y); }},
       { label: 'Distortion', action: function() { createNode('distortion', cp.x, cp.y); }},
       { label: 'Bitcrusher', action: function() { createNode('bitcrusher', cp.x, cp.y); }},
