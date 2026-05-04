@@ -666,8 +666,8 @@ var NODE_DEFS = {
     params: { target: '', targetParam: '', depth: 0.5, offset: 0, bipolar: true }
   },
   strudel: {
-    category: 'Source', title: 'Strudel', inputs: [], outputs: [],
-    params: { code: 'note("c3 eb3 g3 bb3").s("sawtooth").lpf(800).room(0.4)' }
+    category: 'Source', title: 'Strudel', inputs: [], outputs: ['audio'],
+    params: { code: 'note("c3 eb3 g3 bb3").s("sawtooth").lpf(800)' }
   },
   mixer: {
     category: 'Utility', title: 'Mixer', inputs: ['audio'], outputs: ['audio'],
@@ -1375,8 +1375,15 @@ function buildNodeAudio(node) {
     };
   }
   else if (t === 'strudel') {
-    // Strudel runs in its own audio context; this node holds state only
-    node.audio = { type: 'strudel', playing: false };
+    // Output bus — if Strudel can be redirected through us, audio appears here.
+    // If redirect fails, this gain stays silent and Strudel goes to speakers directly.
+    var output = audioCtx.createGain();
+    output.gain.value = 1.0;
+    var routed = false;
+    if (strudelMasterBus) {
+      try { strudelMasterBus.connect(output); routed = true; } catch(e) {}
+    }
+    node.audio = { type: 'strudel', output: output, playing: false, routedToBus: routed };
   }
   else if (t === 'modmatrix') {
     var input = audioCtx.createGain();
@@ -2652,11 +2659,12 @@ function stopModMatrixPoll(node) {
 }
 
 // ─── STRUDEL ENGINE ───
-// Strudel runs as a global singleton — only one playing pattern at a time, but
-// each node can hold its own code and eval/stop independently.
+// Strudel is a singleton — only one playing pattern at a time. Each Strudel
+// node can hold its own code and eval/stop, but they share the same engine.
 var strudelApi = null;
 var strudelLoadPromise = null;
 var strudelActiveNodeId = null;
+var strudelMasterBus = null; // GainNode in our audioCtx that Strudel feeds (if redirect succeeds)
 
 function setStrudelStatus(node, msg, cls) {
   if (!node.el) return;
@@ -2667,65 +2675,152 @@ function setStrudelStatus(node, msg, cls) {
   if (cls) sEl.classList.add(cls);
 }
 
-function loadStrudelLib() {
+// Try several routes — npm name + CDN combos that might exist
+var STRUDEL_URLS = [
+  'https://esm.sh/@strudel/web?bundle',
+  'https://esm.sh/@strudel/web',
+  'https://cdn.jsdelivr.net/npm/@strudel/web/+esm',
+  'https://esm.sh/@strudel.cycles/web?bundle',
+  'https://esm.sh/@strudel.cycles/web'
+];
+
+function tryLoadStrudelUrl(idx, statusFn) {
+  if (idx >= STRUDEL_URLS.length) {
+    return Promise.reject(new Error('all Strudel URLs failed (see console)'));
+  }
+  var url = STRUDEL_URLS[idx];
+  if (statusFn) statusFn('loading… ' + url.split('/').slice(2,4).join('/'));
+  return import(url).then(function(m) {
+    console.log('[strudel] loaded from', url, m);
+    return { module: m, url: url };
+  }, function(err) {
+    console.warn('[strudel]', url, 'failed:', err && err.message);
+    return tryLoadStrudelUrl(idx + 1, statusFn);
+  });
+}
+
+function loadStrudelLib(statusFn) {
   if (strudelApi) return Promise.resolve(strudelApi);
   if (strudelLoadPromise) return strudelLoadPromise;
-  strudelLoadPromise = (function() {
-    return import('https://esm.sh/@strudel/web@1.1.2').then(function(m) {
-      // initStrudel may be sync or async, may return api or expose globally
-      var initFn = m.initStrudel || m.default && m.default.initStrudel;
-      var apiPromise;
-      if (typeof initFn === 'function') {
-        try {
-          var r = initFn();
-          apiPromise = (r && typeof r.then === 'function') ? r : Promise.resolve(r);
-        } catch (e) {
-          apiPromise = Promise.reject(e);
-        }
-      } else {
-        apiPromise = Promise.resolve(null);
+  initAudio();
+  strudelLoadPromise = tryLoadStrudelUrl(0, statusFn).then(function(loaded) {
+    var m = loaded.module;
+    var d = m.default && typeof m.default === 'object' ? m.default : null;
+    var pick = function(name) { return m[name] || (d && d[name]); };
+    var initFn = pick('initStrudel');
+    var initOptions = { audioContext: audioCtx, prebake: undefined };
+    var initResult = null;
+    if (typeof initFn === 'function') {
+      try { initResult = initFn(initOptions); }
+      catch(e) {
+        console.warn('[strudel] init with options failed, retrying without:', e);
+        try { initResult = initFn(); } catch(e2) { console.warn('[strudel] init failed:', e2); }
       }
-      return apiPromise.then(function(initRes) {
-        // Try multiple shapes for the API
-        var api = initRes && initRes.evaluate ? initRes : null;
-        if (!api) {
-          api = {
-            evaluate: m.evaluate || (initRes && initRes.evaluate),
-            hush: m.hush || (initRes && initRes.hush),
-            stop: m.stop || (initRes && initRes.stop)
-          };
-        }
-        if (!api.evaluate) {
-          throw new Error('Strudel: no evaluate() found on module');
-        }
-        strudelApi = api;
-        return api;
-      });
-    }).catch(function(err) {
-      strudelLoadPromise = null;
-      throw err;
+    }
+    return Promise.resolve(initResult).then(function(res) {
+      var api = {};
+      var pickFrom = function(name) {
+        return (res && res[name]) || pick(name);
+      };
+      api.evaluate = pickFrom('evaluate');
+      api.hush = pickFrom('hush');
+      api.silence = pickFrom('silence');
+      api.stop = pickFrom('stop');
+      api.setDefaultOutput = pickFrom('setDefaultOutput');
+      api.setOutput = pickFrom('setOutput');
+      api.getAudioContext = pickFrom('getAudioContext');
+      api.module = m;
+      api.url = loaded.url;
+      if (!api.evaluate) {
+        throw new Error('module loaded but no evaluate() — module keys: ' + Object.keys(m).join(', '));
+      }
+      strudelApi = api;
+      // Attempt to set up a master bus we control
+      try {
+        attemptStrudelBusSetup(api);
+      } catch(e) { console.warn('[strudel] bus setup failed:', e); }
+      return api;
     });
-  })();
+  }).catch(function(err) {
+    strudelLoadPromise = null;
+    throw err;
+  });
   return strudelLoadPromise;
+}
+
+// Try to redirect Strudel's master output through a GainNode we control.
+// Several Strudel versions expose different APIs — try them all.
+function attemptStrudelBusSetup(api) {
+  if (!audioCtx) return;
+  if (strudelMasterBus) return;
+  var bus = audioCtx.createGain();
+  bus.gain.value = 1.0;
+  var didSet = false;
+  // Direct API: setDefaultOutput / setOutput
+  try {
+    if (typeof api.setDefaultOutput === 'function') {
+      api.setDefaultOutput(bus); didSet = true;
+      console.log('[strudel] routed via setDefaultOutput()');
+    } else if (typeof api.setOutput === 'function') {
+      api.setOutput(bus); didSet = true;
+      console.log('[strudel] routed via setOutput()');
+    }
+  } catch(e) { console.warn('[strudel] setOutput attempt failed:', e); }
+  // Module-level fallback
+  if (!didSet && api.module) {
+    try {
+      var fns = ['setDefaultOutput','setOutput','setMaster','setDestination'];
+      for (var i = 0; i < fns.length; i++) {
+        if (typeof api.module[fns[i]] === 'function') {
+          api.module[fns[i]](bus); didSet = true;
+          console.log('[strudel] routed via module.' + fns[i] + '()');
+          break;
+        }
+      }
+    } catch(e) { console.warn('[strudel] module-level redirect failed:', e); }
+  }
+  if (didSet) {
+    strudelMasterBus = bus;
+    // Connect bus to all existing strudel nodes' output
+    nodes.forEach(function(n) {
+      if (n.type === 'strudel' && n.audio && n.audio.output) {
+        try { bus.connect(n.audio.output); } catch(e) {}
+        n.audio.routedToBus = true;
+      }
+    });
+  } else {
+    // Could not redirect — keep bus null; Strudel will play directly to speakers
+    try { bus.disconnect(); } catch(e) {}
+    console.log('[strudel] could not redirect output — playing to speakers directly');
+  }
 }
 
 function evalStrudelNode(node) {
   if (!node.audio || node.audio.type !== 'strudel') return;
-  // User gesture is required for audio — Strudel will use its own context
-  setStrudelStatus(node, 'loading...', 'loading');
-  loadStrudelLib().then(function(api) {
-    setStrudelStatus(node, 'evaluating...', 'loading');
+  initAudio();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  setStrudelStatus(node, 'loading…', 'loading');
+  var statusFn = function(msg) { setStrudelStatus(node, msg, 'loading'); };
+  loadStrudelLib(statusFn).then(function(api) {
+    // Connect our master bus to this node's output if available and not yet connected
+    if (strudelMasterBus && node.audio && !node.audio.routedToBus) {
+      try { strudelMasterBus.connect(node.audio.output); node.audio.routedToBus = true; } catch(e) {}
+    }
+    setStrudelStatus(node, 'evaluating…', 'loading');
     try {
       var result = api.evaluate(node.params.code);
       Promise.resolve(result).then(function() {
         node.audio.playing = true;
         strudelActiveNodeId = node.id;
-        setStrudelStatus(node, 'playing', 'playing');
+        var statusMsg = node.audio.routedToBus ? 'playing → graph' : 'playing → speakers';
+        setStrudelStatus(node, statusMsg, 'playing');
       }).catch(function(err) {
-        setStrudelStatus(node, 'error: ' + (err && err.message || err), 'error');
+        setStrudelStatus(node, 'eval error: ' + (err && err.message || err), 'error');
+        console.warn('[strudel] eval rejected:', err);
       });
     } catch (err) {
-      setStrudelStatus(node, 'error: ' + (err && err.message || err), 'error');
+      setStrudelStatus(node, 'eval error: ' + (err && err.message || err), 'error');
+      console.warn('[strudel] eval threw:', err);
     }
   }).catch(function(err) {
     setStrudelStatus(node, 'load failed: ' + (err && err.message || err), 'error');
@@ -2740,6 +2835,7 @@ function stopStrudelNode(node) {
   }
   try {
     if (typeof strudelApi.hush === 'function') strudelApi.hush();
+    else if (typeof strudelApi.silence === 'function') strudelApi.silence();
     else if (typeof strudelApi.stop === 'function') strudelApi.stop();
   } catch(e) { console.warn('[strudel] stop error', e); }
   if (node.audio) node.audio.playing = false;
