@@ -312,6 +312,80 @@
     position: absolute; top: 0; left: 0; width: 6000px; height: 6000px;
     pointer-events: none; z-index: 6;
   }
+
+  /* ─── KEYBOARD NODE ─── */
+  .kbd-wrap {
+    margin: 8px 0 4px; padding: 6px 6px 4px;
+    background: var(--bg); border: 1.5px solid var(--border); border-radius: 4px;
+    transition: border-color 0.2s;
+  }
+  .kbd-wrap.focused { border-color: var(--active); box-shadow: 0 0 0 1px var(--active-dim); }
+  .kbd-keys {
+    position: relative; height: 64px; user-select: none;
+    display: flex;
+  }
+  .kbd-key {
+    flex: 1; height: 100%; border: 1px solid var(--border);
+    background: var(--text); color: var(--bg);
+    font-size: 8px; letter-spacing: 0.5px; font-family: var(--mono);
+    display: flex; align-items: flex-end; justify-content: center;
+    padding-bottom: 4px; cursor: pointer; transition: background 0.05s;
+    box-sizing: border-box; position: relative;
+  }
+  .kbd-key.black {
+    background: var(--bg); color: var(--dim);
+    position: absolute; top: 0; height: 60%; width: 7%; z-index: 2;
+    border: 1px solid var(--border); border-top: none;
+  }
+  .kbd-key.active { background: var(--active) !important; color: var(--bg); }
+  .kbd-info {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-top: 4px; font-size: 9px; color: var(--ghost); letter-spacing: 1px;
+  }
+  .kbd-info .kbd-hint { font-size: 8px; }
+
+  /* ─── SEQUENCER NODE ─── */
+  .seq-grid {
+    display: grid; grid-template-columns: repeat(16, 1fr); gap: 2px;
+    margin: 8px 0; padding: 4px; background: var(--bg);
+    border: 1.5px solid var(--border); border-radius: 4px;
+  }
+  .seq-step {
+    aspect-ratio: 1; background: var(--raised); border: 1px solid var(--border);
+    border-radius: 2px; cursor: pointer; transition: all 0.1s;
+    font-size: 7px; color: var(--ghost); font-family: var(--mono);
+    display: flex; align-items: center; justify-content: center;
+    min-width: 0; overflow: hidden;
+  }
+  .seq-step.on { background: var(--active-dim); border-color: var(--active); color: var(--active); }
+  .seq-step.cur { box-shadow: 0 0 0 1.5px var(--accent); }
+  .seq-step.on.cur { box-shadow: 0 0 8px var(--active-glow); }
+  .seq-step:hover { border-color: var(--accent); }
+  .seq-mode-row {
+    display: flex; gap: 4px; margin: 4px 0 6px;
+  }
+
+  /* ─── MOD MATRIX NODE ─── */
+  .mm-select {
+    width: 100%; background: var(--bg); border: 1.5px solid var(--border);
+    color: var(--text); font-family: var(--mono); font-size: 10px;
+    padding: 5px 6px; border-radius: 3px; margin: 2px 0 6px;
+    letter-spacing: 0.5px; cursor: pointer;
+  }
+  .mm-select:focus { outline: none; border-color: var(--accent); }
+  .mm-select option { background: var(--surface); color: var(--text); }
+  .mm-mini-label {
+    font-size: 9px; letter-spacing: 1.5px; text-transform: uppercase;
+    color: var(--ghost); margin: 2px 0 1px;
+  }
+  .mm-meter {
+    height: 4px; background: var(--raised); border-radius: 2px;
+    margin: 6px 0 2px; overflow: hidden; position: relative;
+  }
+  .mm-meter-fill {
+    position: absolute; left: 50%; top: 0; bottom: 0;
+    background: var(--active); transition: none; min-width: 1px;
+  }
 </style>
 </head>
 <body>
@@ -326,6 +400,11 @@
       <div class="add-menu-item" data-type="noise"><span class="item-name">Noise</span><span class="item-desc">texture</span></div>
       <div class="add-menu-item" data-type="lfo"><span class="item-name">LFO</span><span class="item-desc">modulate</span></div>
       <div class="add-menu-item" data-type="sampler"><span class="item-name">Sampler</span><span class="item-desc">sample</span></div>
+      <div class="add-menu-item" data-type="keyboard"><span class="item-name">Keyboard</span><span class="item-desc">play</span></div>
+      <div class="add-menu-item" data-type="sequencer"><span class="item-name">Sequencer</span><span class="item-desc">16-step</span></div>
+      <div class="add-menu-divider"></div>
+      <div class="add-menu-cat">Modulator</div>
+      <div class="add-menu-item" data-type="modmatrix"><span class="item-name">Mod Matrix</span><span class="item-desc">route</span></div>
       <div class="add-menu-divider"></div>
       <div class="add-menu-cat">Process</div>
       <div class="add-menu-item" data-type="grain"><span class="item-name">Grain Engine</span><span class="item-desc">granular</span></div>
@@ -500,6 +579,22 @@ var NODE_DEFS = {
   grainchoir: {
     category: 'Process', title: 'Grain Choir', inputs: ['audio'], outputs: ['audio'],
     params: { voices: 4, harmony: 'unison', detune: 0.3, spread: 0.6, grainSize: 100, density: 8, scatter: 0.15, shape: 0.4, warmth: 0.3 }
+  },
+  keyboard: {
+    category: 'Source', title: 'Keyboard', inputs: [], outputs: ['audio'],
+    params: { waveform: 'sawtooth', octave: 4, attack: 0.02, release: 0.3, gain: 0.4, glide: 0 }
+  },
+  sequencer: {
+    category: 'Source', title: 'Sequencer', inputs: [], outputs: ['audio'],
+    params: {
+      bpm: 110, steps: '1010101010101010', stepPitches: '0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0',
+      pitch: 220, jitter: 0, waveform: 'square',
+      gate: 0.4, attack: 0.005, release: 0.18, gain: 0.35
+    }
+  },
+  modmatrix: {
+    category: 'Modulator', title: 'Mod Matrix', inputs: ['mod'], outputs: [],
+    params: { target: '', targetParam: '', depth: 0.5, offset: 0, bipolar: true }
   },
   mixer: {
     category: 'Utility', title: 'Mixer', inputs: ['audio'], outputs: ['audio'],
@@ -1150,6 +1245,41 @@ function buildNodeAudio(node) {
       timers: []
     };
   }
+  else if (t === 'keyboard') {
+    var output = audioCtx.createGain();
+    output.gain.value = node.params.gain || 0.4;
+    node.audio = {
+      type: 'keyboard', output: output, voices: {},
+      lastNote: null
+    };
+  }
+  else if (t === 'sequencer') {
+    var output = audioCtx.createGain();
+    output.gain.value = node.params.gain || 0.35;
+    node.audio = {
+      type: 'sequencer', output: output,
+      lookaheadId: null, nextStepTime: 0, currentStep: 0,
+      activeVoices: []
+    };
+  }
+  else if (t === 'modmatrix') {
+    var input = audioCtx.createGain();
+    input.gain.value = 1.0;
+    var analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.0;
+    input.connect(analyser);
+    // Analyser needs a sink to actually pull samples — connect to silent destination
+    var silent = audioCtx.createGain();
+    silent.gain.value = 0;
+    analyser.connect(silent);
+    silent.connect(audioCtx.destination);
+    node.audio = {
+      type: 'modmatrix', input: input, analyser: analyser, silent: silent,
+      pollId: null, lastVal: 0
+    };
+    startModMatrixPoll(node);
+  }
   else if (t === 'output') {
     var input = audioCtx.createGain();
     input.gain.value = node.params.volume || 0.7;
@@ -1260,6 +1390,17 @@ function destroyNodeAudio(node) {
     try { node.audio.warmthFilter.disconnect(); } catch(e) {}
     try { node.audio.grainOutput.disconnect(); } catch(e) {}
     if (node.audio.input) try { node.audio.input.disconnect(); } catch(e) {}
+  }
+  if (node.audio.type === 'keyboard') {
+    stopAllKeyboardVoices(node);
+  }
+  if (node.audio.type === 'sequencer') {
+    stopSequencer(node);
+  }
+  if (node.audio.type === 'modmatrix') {
+    stopModMatrixPoll(node);
+    try { node.audio.analyser.disconnect(); } catch(e) {}
+    try { node.audio.silent.disconnect(); } catch(e) {}
   }
   if (node.audio.output) try { node.audio.output.disconnect(); } catch(e) {}
   if (node.audio.input) try { node.audio.input.disconnect(); } catch(e) {}
@@ -1965,6 +2106,305 @@ function stopChoirGrainEngine(choirNode) {
   }
 }
 
+// ─── KEYBOARD ENGINE ───
+function midiToFreq(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+
+function noteOnKeyboard(node, midi) {
+  if (!audioCtx || !node.audio || node.audio.type !== 'keyboard') return;
+  if (node.audio.voices[midi]) return; // already on
+  var osc = audioCtx.createOscillator();
+  osc.type = node.params.waveform || 'sawtooth';
+  var freq = midiToFreq(midi);
+  osc.frequency.value = freq;
+  // Glide from previous note frequency if present
+  var glide = node.params.glide || 0;
+  var lastNote = node.audio.lastNote;
+  if (glide > 0 && lastNote != null) {
+    var prevFreq = midiToFreq(lastNote);
+    osc.frequency.cancelScheduledValues(audioCtx.currentTime);
+    osc.frequency.setValueAtTime(prevFreq, audioCtx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(freq, audioCtx.currentTime + glide);
+  }
+  var g = audioCtx.createGain();
+  g.gain.value = 0;
+  var att = Math.max(0.001, node.params.attack || 0.02);
+  g.gain.setValueAtTime(0, audioCtx.currentTime);
+  g.gain.linearRampToValueAtTime(0.6, audioCtx.currentTime + att);
+  osc.connect(g);
+  g.connect(node.audio.output);
+  osc.start();
+  node.audio.voices[midi] = { osc: osc, gain: g };
+  node.audio.lastNote = midi;
+  // Visual key highlight
+  if (node.el) {
+    var keyEl = node.el.querySelector('.kbd-key[data-midi="' + midi + '"]');
+    if (keyEl) keyEl.classList.add('active');
+  }
+}
+
+function noteOffKeyboard(node, midi) {
+  if (!audioCtx || !node.audio || node.audio.type !== 'keyboard') return;
+  var v = node.audio.voices[midi];
+  if (!v) return;
+  delete node.audio.voices[midi];
+  var rel = Math.max(0.001, node.params.release || 0.3);
+  var now = audioCtx.currentTime;
+  try {
+    v.gain.gain.cancelScheduledValues(now);
+    v.gain.gain.setValueAtTime(v.gain.gain.value, now);
+    v.gain.gain.linearRampToValueAtTime(0, now + rel);
+  } catch(e) {}
+  setTimeout(function() {
+    try { v.osc.stop(); } catch(e) {}
+    try { v.osc.disconnect(); } catch(e) {}
+    try { v.gain.disconnect(); } catch(e) {}
+  }, rel * 1000 + 50);
+  if (node.el) {
+    var keyEl = node.el.querySelector('.kbd-key[data-midi="' + midi + '"]');
+    if (keyEl) keyEl.classList.remove('active');
+  }
+}
+
+function stopAllKeyboardVoices(node) {
+  if (!node.audio || !node.audio.voices) return;
+  Object.keys(node.audio.voices).forEach(function(midi) {
+    var v = node.audio.voices[midi];
+    try { v.osc.stop(); } catch(e) {}
+    try { v.osc.disconnect(); } catch(e) {}
+    try { v.gain.disconnect(); } catch(e) {}
+  });
+  node.audio.voices = {};
+  if (node.el) {
+    node.el.querySelectorAll('.kbd-key.active').forEach(function(k) { k.classList.remove('active'); });
+  }
+}
+
+// ─── SEQUENCER ENGINE ───
+function parseSeqSteps(s) {
+  if (!s) return new Array(16).fill(0);
+  var out = [];
+  for (var i = 0; i < 16; i++) out.push(s.charAt(i) === '1' ? 1 : 0);
+  return out;
+}
+function parseSeqPitches(s) {
+  if (!s) return new Array(16).fill(0);
+  var parts = String(s).split(',');
+  var out = [];
+  for (var i = 0; i < 16; i++) out.push(parseFloat(parts[i] || 0) || 0);
+  return out;
+}
+
+function startSequencer(node) {
+  if (!audioCtx || !node.audio || node.audio.type !== 'sequencer') return;
+  if (node.audio.lookaheadId) return;
+  node.audio.nextStepTime = audioCtx.currentTime + 0.05;
+  node.audio.currentStep = 0;
+  scheduleSequencerStep(node);
+}
+
+function stopSequencer(node) {
+  if (!node.audio) return;
+  if (node.audio.lookaheadId) {
+    clearTimeout(node.audio.lookaheadId);
+    node.audio.lookaheadId = null;
+  }
+  if (node.audio.activeVoices) {
+    node.audio.activeVoices.forEach(function(v) {
+      try { v.osc.stop(); } catch(e) {}
+      try { v.osc.disconnect(); } catch(e) {}
+      try { v.gain.disconnect(); } catch(e) {}
+    });
+    node.audio.activeVoices = [];
+  }
+  if (node.el) {
+    node.el.querySelectorAll('.seq-step.cur').forEach(function(s) { s.classList.remove('cur'); });
+  }
+}
+
+function scheduleSequencerStep(node) {
+  if (!audioCtx || !node.audio || node.audio.type !== 'sequencer') return;
+  var lookahead = 0.1; // sec
+  var now = audioCtx.currentTime;
+  var bpm = node.params.bpm || 110;
+  var stepDur = 60 / bpm / 4; // 16th notes
+  while (node.audio.nextStepTime < now + lookahead) {
+    var steps = parseSeqSteps(node.params.steps);
+    var stepIdx = node.audio.currentStep;
+    if (steps[stepIdx]) {
+      fireSequencerNote(node, node.audio.nextStepTime, stepDur, stepIdx);
+    }
+    // Visual highlight (slight delay so it lights at the right moment)
+    var hlStep = stepIdx;
+    var hlTime = node.audio.nextStepTime - now;
+    setTimeout(function() {
+      if (!node.el) return;
+      node.el.querySelectorAll('.seq-step.cur').forEach(function(s) { s.classList.remove('cur'); });
+      var sEl = node.el.querySelector('.seq-step[data-step="' + hlStep + '"]');
+      if (sEl) sEl.classList.add('cur');
+    }, Math.max(0, hlTime * 1000));
+    node.audio.nextStepTime += stepDur;
+    node.audio.currentStep = (node.audio.currentStep + 1) % 16;
+  }
+  node.audio.lookaheadId = setTimeout(function() { scheduleSequencerStep(node); }, 25);
+}
+
+function fireSequencerNote(node, when, stepDur, stepIdx) {
+  var basePitch = node.params.pitch || 220;
+  var jitter = node.params.jitter || 0;
+  var pitches = parseSeqPitches(node.params.stepPitches);
+  var semis = pitches[stepIdx] || 0;
+  if (jitter > 0) semis += (Math.random() * 2 - 1) * jitter * 12;
+  var freq = basePitch * Math.pow(2, semis / 12);
+  var osc = audioCtx.createOscillator();
+  osc.type = node.params.waveform || 'square';
+  osc.frequency.value = freq;
+  var g = audioCtx.createGain();
+  g.gain.value = 0;
+  var att = Math.max(0.001, node.params.attack || 0.005);
+  var rel = Math.max(0.001, node.params.release || 0.18);
+  var gate = Math.min(0.95, Math.max(0.05, node.params.gate || 0.4));
+  var holdTime = stepDur * gate;
+  var endTime = when + holdTime;
+  g.gain.setValueAtTime(0, when);
+  g.gain.linearRampToValueAtTime(0.7, when + att);
+  g.gain.setValueAtTime(0.7, endTime);
+  g.gain.linearRampToValueAtTime(0, endTime + rel);
+  osc.connect(g);
+  g.connect(node.audio.output);
+  osc.start(when);
+  osc.stop(endTime + rel + 0.05);
+  var voice = { osc: osc, gain: g };
+  node.audio.activeVoices.push(voice);
+  osc.onended = function() {
+    try { osc.disconnect(); } catch(e) {}
+    try { g.disconnect(); } catch(e) {}
+    var idx = node.audio.activeVoices.indexOf(voice);
+    if (idx > -1) node.audio.activeVoices.splice(idx, 1);
+  };
+}
+
+// ─── MOD MATRIX ENGINE ───
+// Returns { min, max } for a known modulatable param, or null if not supported
+function modParamRange(nodeType, param) {
+  var R = {
+    oscillator: { pitch: [40, 880] },
+    noise: { level: [0, 1] },
+    filter: { frequency: [20, 8000], resonance: [0.1, 20] },
+    delay: { time: [0.01, 2], feedback: [0, 0.95] },
+    reverb: { space: [0, 0.95] },
+    mixer: { gain: [0, 2], pan: [-1, 1] },
+    ringmod: { ringFreq: [20, 5000] },
+    output: { volume: [0, 1] },
+    distortion: { mix: [0, 1], drive: [1, 50] },
+    bitcrusher: { mix: [0, 1] },
+    chorus: { mix: [0, 1] },
+    phaser: { mix: [0, 1] },
+    shimmer: { mix: [0, 1] },
+    tapeloop: { mix: [0, 1] },
+    grain: { grainSize: [5, 400], scatter: [0, 1], shape: [0.01, 0.99] },
+    grainlab: { grainSize: [5, 400], scatter: [0, 1], shape: [0.01, 0.99], layerSpread: [0, 1] },
+    grainchoir: { grainSize: [5, 400], scatter: [0, 1], shape: [0.01, 0.99], detune: [0, 1], spread: [0, 1], warmth: [0, 1] },
+    sequencer: { pitch: [40, 880], jitter: [0, 1], gate: [0.05, 0.95] },
+    keyboard: { gain: [0, 1] }
+  };
+  var t = R[nodeType];
+  if (t && t[param]) return { min: t[param][0], max: t[param][1] };
+  return null;
+}
+
+// Apply a value to a node param in real time (audio + cached node.params)
+function applyParamRealtime(node, param, val) {
+  if (!node || !node.audio || !audioCtx) return;
+  node.params[param] = val;
+  var a = node.audio;
+  var t = a.type;
+  var ct = audioCtx.currentTime;
+  var smooth = 0.02;
+  function setNow(p, v) { try { p.setTargetAtTime(v, ct, smooth); } catch(e) { try { p.value = v; } catch(_) {} } }
+  if (t === 'oscillator' && param === 'pitch' && a.osc) setNow(a.osc.frequency, val);
+  else if (t === 'noise' && param === 'level' && a.output) setNow(a.output.gain, val);
+  else if (t === 'filter' && a.filter) {
+    if (param === 'frequency') setNow(a.filter.frequency, val);
+    if (param === 'resonance') setNow(a.filter.Q, val);
+  }
+  else if (t === 'delay') {
+    if (param === 'time' && a.delay) setNow(a.delay.delayTime, val);
+    if (param === 'feedback' && a.feedback) setNow(a.feedback.gain, val);
+  }
+  else if (t === 'reverb' && param === 'space' && a.dry) {
+    setNow(a.dry.gain, 1 - val); setNow(a.wet.gain, val);
+  }
+  else if (t === 'mixer') {
+    if (param === 'gain' && a.gainNode) setNow(a.gainNode.gain, val);
+    if (param === 'pan' && a.panner) setNow(a.panner.pan, val);
+  }
+  else if (t === 'ringmod' && param === 'ringFreq' && a.carrier) setNow(a.carrier.frequency, val);
+  else if (t === 'output' && param === 'volume' && a.input) setNow(a.input.gain, val);
+  else if (param === 'mix' && a.dry && a.wet) {
+    setNow(a.dry.gain, 1 - val); setNow(a.wet.gain, val);
+  }
+  else if (t === 'grainchoir' && param === 'warmth' && a.warmthFilter) {
+    setNow(a.warmthFilter.frequency, 20000 * Math.pow(0.1, val));
+  }
+  // grain* size/scatter/shape/etc: just write node.params, picked up by next spawn
+}
+
+function startModMatrixPoll(node) {
+  if (!node.audio || node.audio.type !== 'modmatrix') return;
+  if (node.audio.pollId) return;
+  var bin = new Float32Array(node.audio.analyser.fftSize);
+  function tick() {
+    if (!node.audio) return;
+    node.audio.pollId = requestAnimationFrame(tick);
+    var p = node.params;
+    if (!p.target || !p.targetParam) return;
+    var tgt = getNode(parseInt(p.target));
+    if (!tgt) return;
+    var range = modParamRange(tgt.type, p.targetParam);
+    if (!range) return;
+    // Pull modulator instantaneous value
+    try { node.audio.analyser.getFloatTimeDomainData(bin); } catch(e) { return; }
+    var sum = 0;
+    for (var i = 0; i < bin.length; i++) sum += bin[i];
+    var avg = sum / bin.length; // -1..1 typical
+    if (!isFinite(avg)) avg = 0;
+    avg = Math.max(-1, Math.min(1, avg));
+    node.audio.lastVal = avg;
+    var depth = p.depth || 0;
+    var offset = p.offset || 0;
+    var span = (range.max - range.min);
+    var center = (range.min + range.max) / 2;
+    var bipolar = p.bipolar !== false;
+    // Base = current target slider value (the user-set knob position)
+    var base = (typeof tgt.params[p.targetParam] === 'number')
+      ? tgt.params[p.targetParam] : center;
+    // Modulated amount swings ±(depth*span/2) around base + offset*span/2
+    var off = offset * span / 2;
+    var amt = bipolar ? (avg * depth * span / 2) : ((avg + 1) / 2 * depth * span);
+    var v = base + off + amt;
+    if (v < range.min) v = range.min;
+    if (v > range.max) v = range.max;
+    applyParamRealtime(tgt, p.targetParam, v);
+    // Update mini meter
+    if (node.el) {
+      var fill = node.el.querySelector('.mm-meter-fill');
+      if (fill) {
+        var pct = Math.max(-1, Math.min(1, avg * (depth || 1)));
+        var w = Math.abs(pct) * 50;
+        fill.style.width = w + '%';
+        fill.style.left = pct >= 0 ? '50%' : (50 - w) + '%';
+      }
+    }
+  }
+  node.audio.pollId = requestAnimationFrame(tick);
+}
+
+function stopModMatrixPoll(node) {
+  if (!node.audio || !node.audio.pollId) return;
+  cancelAnimationFrame(node.audio.pollId);
+  node.audio.pollId = null;
+}
+
 function startNoiseSource(node) {
   if (!node.audio || node.audio.type !== 'noise') return;
   if (node.audio.sourceNode) {
@@ -2007,6 +2447,7 @@ function connectAudio() {
     if (n.audio.type === 'oscillator') stopOscSource(n);
     if (n.audio.type === 'sampler') stopSamplerSource(n);
     if (n.audio.type === 'reverse') stopReverseEngine(n);
+    if (n.audio.type === 'sequencer') stopSequencer(n);
     if (n.audio.output) try { n.audio.output.disconnect(); } catch(e) {}
     // Disconnect multi-outputs
     if (n.audio.outputs) {
@@ -2128,6 +2569,10 @@ function connectAudio() {
       if (n.type === 'grainlab' && grainlabNeedBuffer[n.id]) startBufferGrainLabEngine(n);
       if (n.type === 'grainchoir' && grainchoirNeedBuffer[n.id]) startBufferChoirGrainEngine(n);
       if (n.type === 'reverse' && reverseNeedStart[n.id]) startReverseEngine(n);
+      // Sequencer: always run when playing (it's a self-driving source)
+      if (n.type === 'sequencer') startSequencer(n);
+      // Mod matrix: ensure poll loop is running
+      if (n.type === 'modmatrix') startModMatrixPoll(n);
     });
   }
 }
@@ -2208,6 +2653,8 @@ function togglePlay() {
       if (n.audio && n.audio.type === 'oscillator') stopOscSource(n);
       if (n.audio && n.audio.type === 'sampler') stopSamplerSource(n);
       if (n.audio && n.audio.type === 'reverse') stopReverseEngine(n);
+      if (n.audio && n.audio.type === 'sequencer') stopSequencer(n);
+      if (n.audio && n.audio.type === 'keyboard') stopAllKeyboardVoices(n);
     });
   }
   updatePlayUI();
@@ -2254,6 +2701,8 @@ function removeNode(node) {
   // Remove connected wires
   var toRemove = wires.filter(function(w) { return w.from === node.id || w.to === node.id; });
   toRemove.forEach(function(w) { deleteWire(w); });
+  // Clear focus refs that point to this node
+  if (focusedKeyboard === node) focusedKeyboard = null;
   // Destroy audio
   destroyNodeAudio(node);
   // Remove from DOM after animation
@@ -2414,6 +2863,36 @@ function renderNode(node) {
     html += slider(node, 'shape', 'Shape', 0.01, 0.99, 0.01, 'f2');
     html += slider(node, 'warmth', 'Warmth', 0, 1, 0.01, 'f2');
   }
+  else if (node.type === 'keyboard') {
+    html += waveButtons(node, ['sine','sawtooth','square','triangle'], ['Sin','Saw','Sqr','Tri']);
+    html += keyboardWidget(node);
+    html += slider(node, 'octave', 'Octave', 1, 7, 1, 'i');
+    html += slider(node, 'attack', 'Attack', 0.001, 0.5, 0.001, 'f3');
+    html += slider(node, 'release', 'Release', 0.01, 2, 0.01, 'f2');
+    html += slider(node, 'glide', 'Glide', 0, 0.5, 0.005, 'f3');
+    html += slider(node, 'gain', 'Gain', 0, 1, 0.01, 'f2');
+  }
+  else if (node.type === 'sequencer') {
+    html += seqGrid(node);
+    html += waveButtons(node, ['sine','sawtooth','square','triangle'], ['Sin','Saw','Sqr','Tri']);
+    html += slider(node, 'bpm', 'BPM', 40, 240, 1, 'i');
+    html += slider(node, 'pitch', 'Pitch', 40, 880, 1, 'hz');
+    html += slider(node, 'jitter', 'Jitter', 0, 1, 0.01, 'f2');
+    html += slider(node, 'gate', 'Gate', 0.05, 0.95, 0.01, 'f2');
+    html += slider(node, 'attack', 'Attack', 0.001, 0.2, 0.001, 'f3');
+    html += slider(node, 'release', 'Release', 0.01, 1, 0.01, 'f2');
+    html += slider(node, 'gain', 'Gain', 0, 1, 0.01, 'f2');
+  }
+  else if (node.type === 'modmatrix') {
+    html += '<div class="mm-mini-label">Target Node</div>';
+    html += '<select class="mm-select" data-mm="target"></select>';
+    html += '<div class="mm-mini-label">Param</div>';
+    html += '<select class="mm-select" data-mm="targetParam"></select>';
+    html += '<div class="mm-meter"><div class="mm-meter-fill"></div></div>';
+    html += slider(node, 'depth', 'Depth', 0, 1, 0.01, 'f2');
+    html += slider(node, 'offset', 'Offset', -1, 1, 0.01, 'f2');
+    html += waveButtons(node, [true, false], ['Bipolar', 'Unipolar'], 'bipolar');
+  }
   else if (node.type === 'output') {
     html += slider(node, 'volume', 'Volume', 0, 1, 0.01, 'f2');
   }
@@ -2530,6 +3009,14 @@ function renderNode(node) {
         if (paramName === 'harmony' && node.audio && node.audio.type === 'grainchoir') {
           // Harmony change — restart engine to apply new intervals
           connectAudio();
+        }
+        // Keyboard waveform: update all currently sounding voices
+        if (paramName === 'waveform' && node.audio && node.audio.type === 'keyboard') {
+          var w = btn.dataset.wave;
+          Object.keys(node.audio.voices).forEach(function(midi) {
+            var v = node.audio.voices[midi];
+            if (v && v.osc) v.osc.type = w;
+          });
         }
       }
     });
@@ -2667,6 +3154,16 @@ function renderNode(node) {
             node.audio.warmthFilter.frequency.setTargetAtTime(20000 * Math.pow(0.1, val), audioCtx.currentTime, 0.05);
           }
         }
+        // Keyboard
+        if (node.audio.type === 'keyboard') {
+          if (param === 'gain' && node.audio.output) node.audio.output.gain.setTargetAtTime(val, audioCtx.currentTime, 0.05);
+          // Update live oscillators if any waveform/freq changes happen via slider — none here
+        }
+        // Sequencer
+        if (node.audio.type === 'sequencer') {
+          if (param === 'gain' && node.audio.output) node.audio.output.gain.setTargetAtTime(val, audioCtx.currentTime, 0.05);
+          // bpm/pitch/jitter/gate/attack/release picked up at next step
+        }
       }
       scheduleAutoSave();
     });
@@ -2709,6 +3206,21 @@ function renderNode(node) {
     if (node._sampleBuffer) dropZone.classList.add('loaded');
   }
 
+  // Keyboard: mouse click + focus
+  if (node.type === 'keyboard') {
+    bindKeyboardNode(node, el);
+  }
+
+  // Sequencer: step grid clicks
+  if (node.type === 'sequencer') {
+    bindSequencerNode(node, el);
+  }
+
+  // Mod Matrix: dropdown population + change handlers
+  if (node.type === 'modmatrix') {
+    bindModMatrixNode(node, el);
+  }
+
   // Click to select
   el.addEventListener('mousedown', function(e) { selectNode(node); });
   // Right-click context menu
@@ -2740,6 +3252,239 @@ function slider(node, param, label, min, max, step, fmt) {
     '<span class="node-ctrl-label">'+label+'</span>' +
     '<span class="node-ctrl-val ctrl-val-'+param+'">'+fmtVal(val,fmt)+'</span>' +
     '</div><input type="range" min="'+min+'" max="'+max+'" step="'+step+'" value="'+val+'" data-param="'+param+'" data-format="'+fmt+'"></div>';
+}
+
+// Keyboard widget — 1.5 octaves (C through F+, 18 white-equivalent positions)
+// Physical mapping: a s d f g h j k l ; ' (lower row whites);
+// w e   t y u   o p (upper black keys); z/x = octave down/up
+var KBD_LAYOUT = [
+  // octave 0 from base
+  { white: true, semi: 0,  label: 'C',  key: 'a' },
+  { white: false, semi: 1, label: 'C#', key: 'w' },
+  { white: true, semi: 2,  label: 'D',  key: 's' },
+  { white: false, semi: 3, label: 'D#', key: 'e' },
+  { white: true, semi: 4,  label: 'E',  key: 'd' },
+  { white: true, semi: 5,  label: 'F',  key: 'f' },
+  { white: false, semi: 6, label: 'F#', key: 't' },
+  { white: true, semi: 7,  label: 'G',  key: 'g' },
+  { white: false, semi: 8, label: 'G#', key: 'y' },
+  { white: true, semi: 9,  label: 'A',  key: 'h' },
+  { white: false, semi: 10,label: 'A#', key: 'u' },
+  { white: true, semi: 11, label: 'B',  key: 'j' },
+  // octave +1
+  { white: true, semi: 12, label: 'C',  key: 'k' },
+  { white: false, semi: 13,label: 'C#', key: 'o' },
+  { white: true, semi: 14, label: 'D',  key: 'l' },
+  { white: false, semi: 15,label: 'D#', key: 'p' },
+  { white: true, semi: 16, label: 'E',  key: ';' },
+  { white: true, semi: 17, label: 'F',  key: "'" }
+];
+
+function keyboardWidget(node) {
+  var oct = node.params.octave || 4;
+  var baseMidi = 12 * (oct + 1); // MIDI: octave 4 → C4 = 60
+  var whites = KBD_LAYOUT.filter(function(k) { return k.white; });
+  var html = '<div class="kbd-wrap" data-kbd-id="'+node.id+'"><div class="kbd-keys">';
+  // White keys
+  whites.forEach(function(k, idx) {
+    var midi = baseMidi + k.semi;
+    html += '<div class="kbd-key" data-midi="'+midi+'" data-key="'+k.key+'">'
+         +  '<span>'+k.label+'<br>'+k.key.toUpperCase()+'</span></div>';
+  });
+  // Black keys (positioned absolutely over the whites)
+  // For each black key, compute its left position based on its preceding white index
+  var whiteIdx = 0;
+  KBD_LAYOUT.forEach(function(k) {
+    if (k.white) { whiteIdx++; return; }
+    var midi = baseMidi + k.semi;
+    // place between whiteIdx-1 and whiteIdx
+    var leftPct = (whiteIdx / whites.length) * 100 - (100 / whites.length) * 0.35;
+    html += '<div class="kbd-key black" data-midi="'+midi+'" data-key="'+k.key+'" '
+         +  'style="left:'+leftPct.toFixed(2)+'%">'
+         +  '<span>'+k.key.toUpperCase()+'</span></div>';
+  });
+  html += '</div><div class="kbd-info">'
+       + '<span>Click to focus</span>'
+       + '<span class="kbd-hint">Z / X = octave</span>'
+       + '</div></div>';
+  return html;
+}
+
+function seqGrid(node) {
+  var steps = parseSeqSteps(node.params.steps);
+  var html = '<div class="seq-grid">';
+  for (var i = 0; i < 16; i++) {
+    var on = steps[i] ? ' on' : '';
+    html += '<div class="seq-step'+on+'" data-step="'+i+'">'+(i+1)+'</div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+// ─── KEYBOARD NODE BINDINGS ───
+var focusedKeyboard = null; // node currently receiving physical key events
+
+function bindKeyboardNode(node, el) {
+  var wrap = el.querySelector('.kbd-wrap');
+  if (!wrap) return;
+  // Mouse: per-key down/up
+  el.querySelectorAll('.kbd-key').forEach(function(keyEl) {
+    keyEl.addEventListener('mousedown', function(e) {
+      e.stopPropagation();
+      if (!isPlaying) togglePlay();
+      if (!node.audio) return;
+      var midi = parseInt(keyEl.dataset.midi);
+      noteOnKeyboard(node, midi);
+      focusKeyboard(node);
+      var endFn = function() {
+        noteOffKeyboard(node, midi);
+        document.removeEventListener('mouseup', endFn);
+        keyEl.removeEventListener('mouseleave', endFn);
+      };
+      document.addEventListener('mouseup', endFn);
+      keyEl.addEventListener('mouseleave', endFn);
+    });
+  });
+  // Click on wrap (not on a key) to focus without playing
+  wrap.addEventListener('mousedown', function(e) {
+    if (!e.target.classList.contains('kbd-key')) {
+      e.stopPropagation();
+      focusKeyboard(node);
+    }
+  });
+  // Update key labels when octave changes (re-render keyboard region)
+  var oldInputHandler = null;
+  el.querySelectorAll('input[type=range][data-param="octave"]').forEach(function(sl) {
+    sl.addEventListener('input', function() {
+      // Re-render just the keyboard widget
+      stopAllKeyboardVoices(node);
+      var oldWrap = el.querySelector('.kbd-wrap');
+      if (oldWrap) {
+        var tmp = document.createElement('div');
+        tmp.innerHTML = keyboardWidget(node);
+        var newWrap = tmp.querySelector('.kbd-wrap');
+        oldWrap.parentNode.replaceChild(newWrap, oldWrap);
+        // Re-bind clicks for new keys
+        bindKeyboardKeys(node, el);
+        if (focusedKeyboard === node) newWrap.classList.add('focused');
+      }
+    });
+  });
+}
+
+function bindKeyboardKeys(node, el) {
+  el.querySelectorAll('.kbd-key').forEach(function(keyEl) {
+    keyEl.addEventListener('mousedown', function(e) {
+      e.stopPropagation();
+      if (!isPlaying) togglePlay();
+      if (!node.audio) return;
+      var midi = parseInt(keyEl.dataset.midi);
+      noteOnKeyboard(node, midi);
+      focusKeyboard(node);
+      var endFn = function() {
+        noteOffKeyboard(node, midi);
+        document.removeEventListener('mouseup', endFn);
+        keyEl.removeEventListener('mouseleave', endFn);
+      };
+      document.addEventListener('mouseup', endFn);
+      keyEl.addEventListener('mouseleave', endFn);
+    });
+  });
+}
+
+function focusKeyboard(node) {
+  if (focusedKeyboard === node) return;
+  if (focusedKeyboard && focusedKeyboard.el) {
+    var prev = focusedKeyboard.el.querySelector('.kbd-wrap');
+    if (prev) prev.classList.remove('focused');
+  }
+  focusedKeyboard = node;
+  if (node && node.el) {
+    var w = node.el.querySelector('.kbd-wrap');
+    if (w) w.classList.add('focused');
+  }
+}
+
+// ─── SEQUENCER NODE BINDINGS ───
+function bindSequencerNode(node, el) {
+  el.querySelectorAll('.seq-step').forEach(function(stepEl) {
+    stepEl.addEventListener('mousedown', function(e) {
+      e.stopPropagation();
+      var idx = parseInt(stepEl.dataset.step);
+      var steps = parseSeqSteps(node.params.steps);
+      steps[idx] = steps[idx] ? 0 : 1;
+      node.params.steps = steps.join('');
+      stepEl.classList.toggle('on', !!steps[idx]);
+      scheduleAutoSave();
+    });
+  });
+  // BPM live update — restart scheduling timing
+  el.querySelectorAll('input[type=range][data-param="bpm"]').forEach(function(sl) {
+    sl.addEventListener('input', function() {
+      // Already updates node.params via slider handler; sequencer uses next iteration
+    });
+  });
+}
+
+// ─── MOD MATRIX NODE BINDINGS ───
+function populateMmTargets(node, el) {
+  var sel = el.querySelector('select[data-mm="target"]');
+  if (!sel) return;
+  var current = node.params.target || '';
+  var html = '<option value="">-- pick node --</option>';
+  nodes.forEach(function(n) {
+    if (n.id === node.id) return;
+    if (n.type === 'modmatrix' || n.type === 'lfo') return; // pickable as input only
+    var def = NODE_DEFS[n.type];
+    var label = def.title + ' #' + n.id;
+    var sel2 = (String(n.id) === String(current)) ? ' selected' : '';
+    html += '<option value="'+n.id+'"'+sel2+'>'+label+'</option>';
+  });
+  sel.innerHTML = html;
+}
+
+function populateMmParams(node, el) {
+  var sel = el.querySelector('select[data-mm="targetParam"]');
+  if (!sel) return;
+  var tgt = node.params.target ? getNode(parseInt(node.params.target)) : null;
+  var current = node.params.targetParam || '';
+  var html = '<option value="">-- pick param --</option>';
+  if (tgt) {
+    var paramKeys = Object.keys(tgt.params);
+    paramKeys.forEach(function(p) {
+      var range = modParamRange(tgt.type, p);
+      if (!range) return;
+      var sel2 = (p === current) ? ' selected' : '';
+      html += '<option value="'+p+'"'+sel2+'>'+p+'</option>';
+    });
+  }
+  sel.innerHTML = html;
+}
+
+function bindModMatrixNode(node, el) {
+  populateMmTargets(node, el);
+  populateMmParams(node, el);
+  var tgtSel = el.querySelector('select[data-mm="target"]');
+  var paramSel = el.querySelector('select[data-mm="targetParam"]');
+  if (tgtSel) {
+    tgtSel.addEventListener('mousedown', function(e) {
+      e.stopPropagation();
+      populateMmTargets(node, el);
+    });
+    tgtSel.addEventListener('change', function() {
+      node.params.target = tgtSel.value;
+      node.params.targetParam = '';
+      populateMmParams(node, el);
+      scheduleAutoSave();
+    });
+  }
+  if (paramSel) {
+    paramSel.addEventListener('mousedown', function(e) { e.stopPropagation(); });
+    paramSel.addEventListener('change', function() {
+      node.params.targetParam = paramSel.value;
+      scheduleAutoSave();
+    });
+  }
 }
 
 function fmtVal(v, f) {
@@ -2926,6 +3671,9 @@ canvasEl.addEventListener('contextmenu', function(e) {
       { label: 'Noise', action: function() { createNode('noise', cp.x, cp.y); }},
       { label: 'LFO', action: function() { createNode('lfo', cp.x, cp.y); }},
       { label: 'Sampler', action: function() { createNode('sampler', cp.x, cp.y); }},
+      { label: 'Keyboard', action: function() { createNode('keyboard', cp.x, cp.y); }},
+      { label: 'Sequencer', action: function() { createNode('sequencer', cp.x, cp.y); }},
+      { label: 'Mod Matrix', action: function() { createNode('modmatrix', cp.x, cp.y); }},
       { label: 'Grain Engine', action: function() { createNode('grain', cp.x, cp.y); }},
       { label: 'Reverse', action: function() { createNode('reverse', cp.x, cp.y); }},
       { label: 'Grain Lab', action: function() { createNode('grainlab', cp.x, cp.y); }},
@@ -3014,6 +3762,63 @@ document.addEventListener('mouseup', function(e) {
     }
     if (tempWirePath) { tempWirePath.remove(); tempWirePath = null; }
     draggingWire = null;
+  }
+});
+
+// ─── PHYSICAL KEYBOARD → focused Keyboard node ───
+var pressedKbdKeys = {};
+function kbdKeyToMidi(node, key) {
+  if (!node) return null;
+  var oct = node.params.octave || 4;
+  var baseMidi = 12 * (oct + 1);
+  for (var i = 0; i < KBD_LAYOUT.length; i++) {
+    if (KBD_LAYOUT[i].key === key) return baseMidi + KBD_LAYOUT[i].semi;
+  }
+  return null;
+}
+document.addEventListener('keydown', function(e) {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  if (!focusedKeyboard) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  var key = e.key.toLowerCase();
+  // Octave shift
+  if (key === 'z') {
+    e.preventDefault();
+    var sl = focusedKeyboard.el && focusedKeyboard.el.querySelector('input[type=range][data-param="octave"]');
+    if (sl && parseInt(sl.value) > 1) { sl.value = parseInt(sl.value) - 1; sl.dispatchEvent(new Event('input', {bubbles:false})); }
+    return;
+  }
+  if (key === 'x') {
+    e.preventDefault();
+    var sl2 = focusedKeyboard.el && focusedKeyboard.el.querySelector('input[type=range][data-param="octave"]');
+    if (sl2 && parseInt(sl2.value) < 7) { sl2.value = parseInt(sl2.value) + 1; sl2.dispatchEvent(new Event('input', {bubbles:false})); }
+    return;
+  }
+  var midi = kbdKeyToMidi(focusedKeyboard, key);
+  if (midi == null) return;
+  if (pressedKbdKeys[key]) return;
+  pressedKbdKeys[key] = midi;
+  e.preventDefault();
+  if (!isPlaying) togglePlay();
+  if (!focusedKeyboard.audio) return;
+  noteOnKeyboard(focusedKeyboard, midi);
+});
+document.addEventListener('keyup', function(e) {
+  var key = e.key.toLowerCase();
+  if (pressedKbdKeys[key] != null && focusedKeyboard) {
+    var midi = pressedKbdKeys[key];
+    delete pressedKbdKeys[key];
+    noteOffKeyboard(focusedKeyboard, midi);
+  }
+});
+// Release keyboard focus when clicking on empty canvas
+canvasEl.addEventListener('mousedown', function(e) {
+  if (e.target === canvasEl || e.target === canvasInner || e.target === wireLayer || e.target === particleCanvas) {
+    if (focusedKeyboard && focusedKeyboard.el) {
+      var w = focusedKeyboard.el.querySelector('.kbd-wrap');
+      if (w) w.classList.remove('focused');
+    }
+    focusedKeyboard = null;
   }
 });
 
