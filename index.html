@@ -364,11 +364,34 @@
   .seq-mode-row {
     display: flex; gap: 4px; margin: 4px 0 6px;
   }
+  .seq-grid.pitched {
+    grid-template-columns: repeat(8, 1fr);
+    grid-auto-rows: 32px;
+    gap: 3px;
+  }
   .seq-grid.pitched .seq-step {
-    font-size: 9px; font-weight: 500;
+    aspect-ratio: auto; height: 32px;
+    font-size: 10px; font-weight: 500; position: relative;
+    overflow: visible;
+    cursor: ns-resize;
   }
   .seq-grid.pitched .seq-step.on {
     color: var(--active);
+  }
+  .seq-grid.pitched .seq-step .step-label {
+    position: relative; z-index: 2;
+  }
+  .seq-grid.pitched .seq-step .step-pitch-bar {
+    position: absolute; left: 3px; right: 3px;
+    height: 1.5px; background: var(--active);
+    pointer-events: none; opacity: 0.85;
+    transition: bottom 0.08s ease-out;
+  }
+  .seq-grid.pitched .seq-step:not(.on) .step-pitch-bar {
+    opacity: 0.25; background: var(--ghost);
+  }
+  .seq-grid.pitched .seq-step.dragging {
+    box-shadow: 0 0 0 1.5px var(--accent);
   }
   .seq-hint {
     font-size: 8px; color: var(--ghost); letter-spacing: 1px;
@@ -396,6 +419,27 @@
     position: absolute; left: 50%; top: 0; bottom: 0;
     background: var(--active); transition: none; min-width: 1px;
   }
+
+  /* ─── STRUDEL NODE ─── */
+  .node[data-strudel-node] { min-width: 280px; }
+  .strudel-code {
+    width: 100%; min-height: 90px;
+    background: var(--bg); border: 1.5px solid var(--border);
+    color: var(--text); font-family: var(--mono); font-size: 11px;
+    padding: 8px 10px; border-radius: 3px; line-height: 1.5;
+    resize: vertical; outline: none; box-sizing: border-box;
+    margin: 4px 0;
+  }
+  .strudel-code:focus { border-color: var(--accent); }
+  .strudel-row { display: flex; gap: 4px; margin: 4px 0; }
+  .strudel-row .node-wave-btn { flex: 1; }
+  .strudel-status {
+    font-size: 9px; color: var(--ghost); letter-spacing: 1.5px;
+    text-align: center; padding: 4px 0; text-transform: uppercase;
+  }
+  .strudel-status.error { color: var(--warn); }
+  .strudel-status.playing { color: var(--active); }
+  .strudel-status.loading { color: var(--accent); }
 </style>
 </head>
 <body>
@@ -412,6 +456,7 @@
       <div class="add-menu-item" data-type="sampler"><span class="item-name">Sampler</span><span class="item-desc">sample</span></div>
       <div class="add-menu-item" data-type="keyboard"><span class="item-name">Keyboard</span><span class="item-desc">play</span></div>
       <div class="add-menu-item" data-type="sequencer"><span class="item-name">Sequencer</span><span class="item-desc">16-step</span></div>
+      <div class="add-menu-item" data-type="strudel"><span class="item-name">Strudel</span><span class="item-desc">live code</span></div>
       <div class="add-menu-divider"></div>
       <div class="add-menu-cat">Modulator</div>
       <div class="add-menu-item" data-type="modmatrix"><span class="item-name">Mod Matrix</span><span class="item-desc">route</span></div>
@@ -619,6 +664,10 @@ var NODE_DEFS = {
   modmatrix: {
     category: 'Modulator', title: 'Mod Matrix', inputs: ['mod'], outputs: [],
     params: { target: '', targetParam: '', depth: 0.5, offset: 0, bipolar: true }
+  },
+  strudel: {
+    category: 'Source', title: 'Strudel', inputs: [], outputs: [],
+    params: { code: 'note("c3 eb3 g3 bb3").s("sawtooth").lpf(800).room(0.4)' }
   },
   mixer: {
     category: 'Utility', title: 'Mixer', inputs: ['audio'], outputs: ['audio'],
@@ -1325,6 +1374,10 @@ function buildNodeAudio(node) {
       activeVoices: []
     };
   }
+  else if (t === 'strudel') {
+    // Strudel runs in its own audio context; this node holds state only
+    node.audio = { type: 'strudel', playing: false };
+  }
   else if (t === 'modmatrix') {
     var input = audioCtx.createGain();
     input.gain.value = 1.0;
@@ -1470,6 +1523,9 @@ function destroyNodeAudio(node) {
     stopModMatrixPoll(node);
     try { node.audio.analyser.disconnect(); } catch(e) {}
     try { node.audio.silent.disconnect(); } catch(e) {}
+  }
+  if (node.audio.type === 'strudel') {
+    if (node.audio.playing) stopStrudelNode(node);
   }
   if (node.audio.output) try { node.audio.output.disconnect(); } catch(e) {}
   if (node.audio.input) try { node.audio.input.disconnect(); } catch(e) {}
@@ -2595,6 +2651,102 @@ function stopModMatrixPoll(node) {
   node.audio.pollId = null;
 }
 
+// ─── STRUDEL ENGINE ───
+// Strudel runs as a global singleton — only one playing pattern at a time, but
+// each node can hold its own code and eval/stop independently.
+var strudelApi = null;
+var strudelLoadPromise = null;
+var strudelActiveNodeId = null;
+
+function setStrudelStatus(node, msg, cls) {
+  if (!node.el) return;
+  var sEl = node.el.querySelector('.strudel-status');
+  if (!sEl) return;
+  sEl.textContent = msg;
+  sEl.classList.remove('error','playing','loading');
+  if (cls) sEl.classList.add(cls);
+}
+
+function loadStrudelLib() {
+  if (strudelApi) return Promise.resolve(strudelApi);
+  if (strudelLoadPromise) return strudelLoadPromise;
+  strudelLoadPromise = (function() {
+    return import('https://esm.sh/@strudel/web@1.1.2').then(function(m) {
+      // initStrudel may be sync or async, may return api or expose globally
+      var initFn = m.initStrudel || m.default && m.default.initStrudel;
+      var apiPromise;
+      if (typeof initFn === 'function') {
+        try {
+          var r = initFn();
+          apiPromise = (r && typeof r.then === 'function') ? r : Promise.resolve(r);
+        } catch (e) {
+          apiPromise = Promise.reject(e);
+        }
+      } else {
+        apiPromise = Promise.resolve(null);
+      }
+      return apiPromise.then(function(initRes) {
+        // Try multiple shapes for the API
+        var api = initRes && initRes.evaluate ? initRes : null;
+        if (!api) {
+          api = {
+            evaluate: m.evaluate || (initRes && initRes.evaluate),
+            hush: m.hush || (initRes && initRes.hush),
+            stop: m.stop || (initRes && initRes.stop)
+          };
+        }
+        if (!api.evaluate) {
+          throw new Error('Strudel: no evaluate() found on module');
+        }
+        strudelApi = api;
+        return api;
+      });
+    }).catch(function(err) {
+      strudelLoadPromise = null;
+      throw err;
+    });
+  })();
+  return strudelLoadPromise;
+}
+
+function evalStrudelNode(node) {
+  if (!node.audio || node.audio.type !== 'strudel') return;
+  // User gesture is required for audio — Strudel will use its own context
+  setStrudelStatus(node, 'loading...', 'loading');
+  loadStrudelLib().then(function(api) {
+    setStrudelStatus(node, 'evaluating...', 'loading');
+    try {
+      var result = api.evaluate(node.params.code);
+      Promise.resolve(result).then(function() {
+        node.audio.playing = true;
+        strudelActiveNodeId = node.id;
+        setStrudelStatus(node, 'playing', 'playing');
+      }).catch(function(err) {
+        setStrudelStatus(node, 'error: ' + (err && err.message || err), 'error');
+      });
+    } catch (err) {
+      setStrudelStatus(node, 'error: ' + (err && err.message || err), 'error');
+    }
+  }).catch(function(err) {
+    setStrudelStatus(node, 'load failed: ' + (err && err.message || err), 'error');
+    console.warn('[strudel] load failed', err);
+  });
+}
+
+function stopStrudelNode(node) {
+  if (!strudelApi) {
+    setStrudelStatus(node, 'idle');
+    return;
+  }
+  try {
+    if (typeof strudelApi.hush === 'function') strudelApi.hush();
+    else if (typeof strudelApi.stop === 'function') strudelApi.stop();
+  } catch(e) { console.warn('[strudel] stop error', e); }
+  if (node.audio) node.audio.playing = false;
+  if (strudelActiveNodeId === node.id) strudelActiveNodeId = null;
+  setStrudelStatus(node, 'stopped');
+}
+
 function startNoiseSource(node) {
   if (!node.audio || node.audio.type !== 'noise') return;
   if (node.audio.sourceNode) {
@@ -3085,6 +3237,17 @@ function renderNode(node) {
     html += slider(node, 'shape', 'Shape', 0.01, 0.99, 0.01, 'f2');
     html += slider(node, 'gain', 'Gain', 0, 1, 0.01, 'f2');
   }
+  else if (node.type === 'strudel') {
+    html += '<div class="mm-mini-label">Strudel Pattern</div>';
+    html += '<textarea class="strudel-code" spellcheck="false">'
+         + (node.params.code || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+         + '</textarea>';
+    html += '<div class="strudel-row">';
+    html += '<button class="node-wave-btn" data-strudel="eval">▶ Eval</button>';
+    html += '<button class="node-wave-btn" data-strudel="stop">■ Stop</button>';
+    html += '</div>';
+    html += '<div class="strudel-status">idle</div>';
+  }
   else if (node.type === 'modmatrix') {
     html += '<div class="mm-mini-label">Target Node</div>';
     html += '<select class="mm-select" data-mm="target"></select>';
@@ -3433,6 +3596,11 @@ function renderNode(node) {
     bindModMatrixNode(node, el);
   }
 
+  // Strudel: textarea + eval/stop
+  if (node.type === 'strudel') {
+    bindStrudelNode(node, el);
+  }
+
   // Click to select
   el.addEventListener('mousedown', function(e) { selectNode(node); });
   // Right-click context menu
@@ -3533,6 +3701,13 @@ function seqGrid(node) {
   return html;
 }
 
+function pitchBarBottom(semis) {
+  // map -36..+36 → 2..(height-2)px, centered at half height (~14px for 30px cell)
+  // express as % of cell height (excluding small margin)
+  var pct = ((semis + 36) / 72) * 90 + 5;
+  return pct.toFixed(1) + '%';
+}
+
 function grainSeqGrid(node) {
   var steps = parseSeqSteps(node.params.steps);
   var notes = parseSeqNotes(node.params.notes);
@@ -3540,10 +3715,14 @@ function grainSeqGrid(node) {
   for (var i = 0; i < 16; i++) {
     var on = steps[i] ? ' on' : '';
     var label = steps[i] ? noteName(notes[i]) : (i + 1);
-    html += '<div class="seq-step'+on+'" data-step="'+i+'" title="scroll to change pitch">'+label+'</div>';
+    var bottom = pitchBarBottom(notes[i]);
+    html += '<div class="seq-step'+on+'" data-step="'+i+'" title="click toggle · drag pitch · scroll ±1 · shift = octave · right-click clear">'
+         +  '<div class="step-pitch-bar" style="bottom:'+bottom+'"></div>'
+         +  '<span class="step-label">'+label+'</span>'
+         +  '</div>';
   }
   html += '</div>';
-  html += '<div class="seq-hint">click step · scroll to pitch</div>';
+  html += '<div class="seq-hint">click toggle · drag ↑↓ pitch · scroll ±1 · shift octave</div>';
   return html;
 }
 
@@ -3653,22 +3832,71 @@ function bindSequencerNode(node, el) {
 }
 
 // ─── GRAIN SEQUENCER BINDINGS ───
+function updateStepVisual(stepEl, steps, notes, idx) {
+  var on = !!steps[idx];
+  stepEl.classList.toggle('on', on);
+  var lbl = stepEl.querySelector('.step-label');
+  if (lbl) lbl.textContent = on ? noteName(notes[idx]) : (idx + 1);
+  var bar = stepEl.querySelector('.step-pitch-bar');
+  if (bar) bar.style.bottom = pitchBarBottom(notes[idx]);
+}
+
 function bindGrainSeqNode(node, el) {
   el.querySelectorAll('.seq-step').forEach(function(stepEl) {
     var idx = parseInt(stepEl.dataset.step);
-    // Click: toggle on/off
+
+    // Mousedown: start tracking drag-vs-click
     stepEl.addEventListener('mousedown', function(e) {
-      e.stopPropagation();
       if (e.button !== 0) return;
-      var steps = parseSeqSteps(node.params.steps);
-      var notes = parseSeqNotes(node.params.notes);
-      steps[idx] = steps[idx] ? 0 : 1;
-      node.params.steps = steps.join('');
-      stepEl.classList.toggle('on', !!steps[idx]);
-      stepEl.textContent = steps[idx] ? noteName(notes[idx]) : (idx + 1);
-      scheduleAutoSave();
+      e.preventDefault();
+      e.stopPropagation();
+      selectNode(node);
+      var startY = e.clientY;
+      var startNote = parseSeqNotes(node.params.notes)[idx];
+      var didDrag = false;
+      var DRAG_THRESHOLD = 4;
+      var PX_PER_SEMI = 5;
+      function onMove(ev) {
+        var dy = startY - ev.clientY; // up = positive
+        if (!didDrag && Math.abs(dy) > DRAG_THRESHOLD) {
+          didDrag = true;
+          stepEl.classList.add('dragging');
+        }
+        if (didDrag) {
+          var delta = Math.round(dy / PX_PER_SEMI);
+          if (ev.shiftKey) delta = Math.round(delta / 12) * 12;
+          var newNote = Math.max(-36, Math.min(36, startNote + delta));
+          var notes = parseSeqNotes(node.params.notes);
+          notes[idx] = newNote;
+          node.params.notes = notes.join(',');
+          // Auto-enable on first drag
+          var steps = parseSeqSteps(node.params.steps);
+          if (!steps[idx]) {
+            steps[idx] = 1;
+            node.params.steps = steps.join('');
+          }
+          updateStepVisual(stepEl, steps, notes, idx);
+        }
+      }
+      function onUp() {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        stepEl.classList.remove('dragging');
+        if (!didDrag) {
+          // Treat as click → toggle on/off
+          var steps = parseSeqSteps(node.params.steps);
+          var notes = parseSeqNotes(node.params.notes);
+          steps[idx] = steps[idx] ? 0 : 1;
+          node.params.steps = steps.join('');
+          updateStepVisual(stepEl, steps, notes, idx);
+        }
+        scheduleAutoSave();
+      }
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
     });
-    // Wheel: change pitch ±1 (shift = ±12 / octave)
+
+    // Wheel: still works for fine-tune
     stepEl.addEventListener('wheel', function(e) {
       e.preventDefault();
       e.stopPropagation();
@@ -3678,15 +3906,14 @@ function bindGrainSeqNode(node, el) {
       var step = e.shiftKey ? 12 : 1;
       notes[idx] = Math.max(-36, Math.min(36, notes[idx] + dir * step));
       node.params.notes = notes.join(',');
-      // Auto-enable step when pitching
       if (!steps[idx]) {
         steps[idx] = 1;
         node.params.steps = steps.join('');
-        stepEl.classList.add('on');
       }
-      stepEl.textContent = noteName(notes[idx]);
+      updateStepVisual(stepEl, steps, notes, idx);
       scheduleAutoSave();
     }, { passive: false });
+
     // Right-click: clear pitch to 0 (root)
     stepEl.addEventListener('contextmenu', function(e) {
       e.preventDefault();
@@ -3695,7 +3922,7 @@ function bindGrainSeqNode(node, el) {
       var steps = parseSeqSteps(node.params.steps);
       notes[idx] = 0;
       node.params.notes = notes.join(',');
-      if (steps[idx]) stepEl.textContent = noteName(0);
+      updateStepVisual(stepEl, steps, notes, idx);
       scheduleAutoSave();
     });
   });
@@ -3734,6 +3961,36 @@ function populateMmParams(node, el) {
     });
   }
   sel.innerHTML = html;
+}
+
+// ─── STRUDEL NODE BINDINGS ───
+function bindStrudelNode(node, el) {
+  el.dataset.strudelNode = '1';
+  var ta = el.querySelector('textarea.strudel-code');
+  if (ta) {
+    ta.addEventListener('mousedown', function(e) { e.stopPropagation(); });
+    ta.addEventListener('keydown', function(e) { e.stopPropagation(); });
+    ta.addEventListener('input', function() {
+      node.params.code = ta.value;
+      scheduleAutoSave();
+    });
+    // Cmd/Ctrl + Enter inside the textarea = eval
+    ta.addEventListener('keydown', function(e) {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault();
+        evalStrudelNode(node);
+      }
+    });
+  }
+  el.querySelectorAll('button[data-strudel]').forEach(function(btn) {
+    btn.addEventListener('mousedown', function(e) { e.stopPropagation(); });
+    btn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      var act = btn.dataset.strudel;
+      if (act === 'eval') evalStrudelNode(node);
+      else if (act === 'stop') stopStrudelNode(node);
+    });
+  });
 }
 
 function bindModMatrixNode(node, el) {
@@ -3948,6 +4205,7 @@ canvasEl.addEventListener('contextmenu', function(e) {
       { label: 'Sampler', action: function() { createNode('sampler', cp.x, cp.y); }},
       { label: 'Keyboard', action: function() { createNode('keyboard', cp.x, cp.y); }},
       { label: 'Sequencer', action: function() { createNode('sequencer', cp.x, cp.y); }},
+      { label: 'Strudel', action: function() { createNode('strudel', cp.x, cp.y); }},
       { label: 'Mod Matrix', action: function() { createNode('modmatrix', cp.x, cp.y); }},
       { label: 'Grain Engine', action: function() { createNode('grain', cp.x, cp.y); }},
       { label: 'Reverse', action: function() { createNode('reverse', cp.x, cp.y); }},
@@ -4104,7 +4362,7 @@ canvasEl.addEventListener('mousedown', function(e) {
 
 // ─── KEYBOARD ───
 document.addEventListener('keydown', function(e) {
-  if (e.target.tagName === 'INPUT') return;
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
   // Ctrl+S — save to autosave slot
   if ((e.ctrlKey || e.metaKey) && e.code === 'KeyS' && !e.shiftKey) {
     e.preventDefault();
