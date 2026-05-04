@@ -3777,7 +3777,10 @@ function kbdKeyToMidi(node, key) {
   return null;
 }
 document.addEventListener('keydown', function(e) {
-  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  // Only bail for text-style inputs — range sliders shouldn't trap letter keys
+  if (e.target.tagName === 'TEXTAREA') return;
+  if (e.target.tagName === 'SELECT') return;
+  if (e.target.tagName === 'INPUT' && e.target.type !== 'range') return;
   if (!focusedKeyboard) return;
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   var key = e.key.toLowerCase();
@@ -3804,6 +3807,7 @@ document.addEventListener('keydown', function(e) {
   noteOnKeyboard(focusedKeyboard, midi);
 });
 document.addEventListener('keyup', function(e) {
+  // Always release notes even if slider has focus — otherwise stuck notes
   var key = e.key.toLowerCase();
   if (pressedKbdKeys[key] != null && focusedKeyboard) {
     var midi = pressedKbdKeys[key];
