@@ -364,6 +364,16 @@
   .seq-mode-row {
     display: flex; gap: 4px; margin: 4px 0 6px;
   }
+  .seq-grid.pitched .seq-step {
+    font-size: 9px; font-weight: 500;
+  }
+  .seq-grid.pitched .seq-step.on {
+    color: var(--active);
+  }
+  .seq-hint {
+    font-size: 8px; color: var(--ghost); letter-spacing: 1px;
+    text-align: center; margin: -4px 0 6px;
+  }
 
   /* ─── MOD MATRIX NODE ─── */
   .mm-select {
@@ -411,6 +421,7 @@
       <div class="add-menu-item" data-type="reverse"><span class="item-name">Reverse</span><span class="item-desc">backward</span></div>
       <div class="add-menu-item" data-type="grainlab"><span class="item-name">Grain Lab</span><span class="item-desc">multi-grain</span></div>
       <div class="add-menu-item" data-type="grainchoir"><span class="item-name">Grain Choir</span><span class="item-desc">harmonize</span></div>
+      <div class="add-menu-item" data-type="grainseq"><span class="item-name">Grain Sequencer</span><span class="item-desc">pitched slices</span></div>
       <div class="add-menu-item" data-type="filter"><span class="item-name">Filter</span><span class="item-desc">shape</span></div>
       <div class="add-menu-item" data-type="distortion"><span class="item-name">Distortion</span><span class="item-desc">crunch</span></div>
       <div class="add-menu-item" data-type="bitcrusher"><span class="item-name">Bitcrusher</span><span class="item-desc">lo-fi</span></div>
@@ -590,6 +601,19 @@ var NODE_DEFS = {
       bpm: 110, steps: '1010101010101010', stepPitches: '0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0',
       pitch: 220, jitter: 0, waveform: 'square',
       gate: 0.4, attack: 0.005, release: 0.18, gain: 0.35
+    }
+  },
+  grainseq: {
+    category: 'Process', title: 'Grain Sequencer', inputs: ['audio'], outputs: ['audio'],
+    params: {
+      bpm: 110,
+      steps: '1010101010101010',
+      notes: '0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0',
+      octave: 0,
+      grainSize: 180,
+      position: 0.7,
+      shape: 0.5,
+      gain: 0.6
     }
   },
   modmatrix: {
@@ -1262,6 +1286,45 @@ function buildNodeAudio(node) {
       activeVoices: []
     };
   }
+  else if (t === 'grainseq') {
+    var grainInput = audioCtx.createGain();
+    var output = audioCtx.createGain();
+    output.gain.value = node.params.gain || 0.6;
+    var captureLen = audioCtx.sampleRate * 4;
+    var captureBuffer = audioCtx.createBuffer(1, captureLen, audioCtx.sampleRate);
+    var captureData = captureBuffer.getChannelData(0);
+    var capturePos = 0;
+    var hasCapture = false;
+    var capturer = audioCtx.createScriptProcessor(2048, 1, 1);
+    capturer.onaudioprocess = function(e) {
+      var inp = e.inputBuffer.getChannelData(0);
+      var out = e.outputBuffer.getChannelData(0);
+      for (var i = 0; i < inp.length; i++) {
+        captureData[capturePos] = inp[i];
+        capturePos = (capturePos + 1) % captureLen;
+        out[i] = 0;
+      }
+      if (!hasCapture) {
+        for (var j = 0; j < inp.length; j++) {
+          if (Math.abs(inp[j]) > 0.001) { hasCapture = true; break; }
+        }
+      }
+    };
+    grainInput.connect(capturer);
+    var silentDest = audioCtx.createGain();
+    silentDest.gain.value = 0;
+    capturer.connect(silentDest);
+    silentDest.connect(audioCtx.destination);
+    node.audio = {
+      type: 'grainseq', input: grainInput, output: output,
+      captureBuffer: captureBuffer, captureData: captureData, captureLen: captureLen,
+      capturePos: function() { return capturePos; },
+      hasCapture: function() { return hasCapture; },
+      capturer: capturer, silentDest: silentDest,
+      lookaheadId: null, nextStepTime: 0, currentStep: 0,
+      activeVoices: []
+    };
+  }
   else if (t === 'modmatrix') {
     var input = audioCtx.createGain();
     input.gain.value = 1.0;
@@ -1396,6 +1459,12 @@ function destroyNodeAudio(node) {
   }
   if (node.audio.type === 'sequencer') {
     stopSequencer(node);
+  }
+  if (node.audio.type === 'grainseq') {
+    stopGrainSeq(node);
+    try { node.audio.capturer.disconnect(); } catch(e) {}
+    try { node.audio.silentDest.disconnect(); } catch(e) {}
+    if (node.audio.input) try { node.audio.input.disconnect(); } catch(e) {}
   }
   if (node.audio.type === 'modmatrix') {
     stopModMatrixPoll(node);
@@ -2248,6 +2317,126 @@ function scheduleSequencerStep(node) {
   node.audio.lookaheadId = setTimeout(function() { scheduleSequencerStep(node); }, 25);
 }
 
+// ─── GRAIN SEQUENCER ENGINE ───
+function parseSeqNotes(s) {
+  if (!s) return new Array(16).fill(0);
+  var parts = String(s).split(',');
+  var out = [];
+  for (var i = 0; i < 16; i++) out.push(parseInt(parts[i] || 0) || 0);
+  return out;
+}
+function noteName(semis) {
+  var NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+  var n = ((semis % 12) + 12) % 12;
+  return NAMES[n];
+}
+
+function startGrainSeq(node) {
+  if (!audioCtx || !node.audio || node.audio.type !== 'grainseq') return;
+  if (node.audio.lookaheadId) return;
+  node.audio.nextStepTime = audioCtx.currentTime + 0.05;
+  node.audio.currentStep = 0;
+  scheduleGrainSeqStep(node);
+}
+
+function stopGrainSeq(node) {
+  if (!node.audio) return;
+  if (node.audio.lookaheadId) {
+    clearTimeout(node.audio.lookaheadId);
+    node.audio.lookaheadId = null;
+  }
+  if (node.audio.activeVoices) {
+    node.audio.activeVoices.forEach(function(v) {
+      try { v.src.stop(); } catch(e) {}
+      try { v.src.disconnect(); } catch(e) {}
+      try { v.gain.disconnect(); } catch(e) {}
+    });
+    node.audio.activeVoices = [];
+  }
+  if (node.el) {
+    node.el.querySelectorAll('.seq-step.cur').forEach(function(s) { s.classList.remove('cur'); });
+  }
+}
+
+function scheduleGrainSeqStep(node) {
+  if (!audioCtx || !node.audio || node.audio.type !== 'grainseq') return;
+  var lookahead = 0.1;
+  var now = audioCtx.currentTime;
+  var bpm = node.params.bpm || 110;
+  var stepDur = 60 / bpm / 4;
+  while (node.audio.nextStepTime < now + lookahead) {
+    var steps = parseSeqSteps(node.params.steps);
+    var stepIdx = node.audio.currentStep;
+    if (steps[stepIdx]) {
+      fireGrainSeqNote(node, node.audio.nextStepTime, stepDur, stepIdx);
+    }
+    var hlStep = stepIdx;
+    var hlTime = node.audio.nextStepTime - now;
+    setTimeout(function() {
+      if (!node.el) return;
+      node.el.querySelectorAll('.seq-step.cur').forEach(function(s) { s.classList.remove('cur'); });
+      var sEl = node.el.querySelector('.seq-step[data-step="' + hlStep + '"]');
+      if (sEl) sEl.classList.add('cur');
+    }, Math.max(0, hlTime * 1000));
+    node.audio.nextStepTime += stepDur;
+    node.audio.currentStep = (node.audio.currentStep + 1) % 16;
+  }
+  node.audio.lookaheadId = setTimeout(function() { scheduleGrainSeqStep(node); }, 25);
+}
+
+function fireGrainSeqNote(node, when, stepDur, stepIdx) {
+  if (!node.audio.hasCapture()) return;
+  var notes = parseSeqNotes(node.params.notes);
+  var semis = notes[stepIdx] + ((node.params.octave || 0) * 12);
+  var rate = Math.pow(2, semis / 12);
+  var sizeSec = (node.params.grainSize || 180) / 1000;
+  var pos = Math.max(0, Math.min(1, node.params.position || 0.7));
+  var captureLen = node.audio.captureLen;
+  var sampleRate = audioCtx.sampleRate;
+  var sliceFrames = Math.floor(sizeSec * sampleRate);
+  if (sliceFrames < 64) sliceFrames = 64;
+  if (sliceFrames > captureLen - 1) sliceFrames = captureLen - 1;
+  // Take slice ending at `pos` in the rolling buffer (writePos = recent end)
+  var writePos = node.audio.capturePos();
+  // pos=1 means most recent; pos=0 means oldest available
+  var endOffset = Math.floor((1 - pos) * (captureLen - sliceFrames));
+  var startIdx = (writePos - endOffset - sliceFrames + captureLen) % captureLen;
+  // Build a one-shot buffer with the slice (handles wrap-around)
+  var sliceBuf = audioCtx.createBuffer(1, sliceFrames, sampleRate);
+  var sliceData = sliceBuf.getChannelData(0);
+  var src = node.audio.captureData;
+  for (var i = 0; i < sliceFrames; i++) {
+    sliceData[i] = src[(startIdx + i) % captureLen];
+  }
+  var bufSrc = audioCtx.createBufferSource();
+  bufSrc.buffer = sliceBuf;
+  bufSrc.playbackRate.value = rate;
+  // Envelope
+  var shape = node.params.shape || 0.5;
+  var gate = 0.9; // play most of step duration
+  var holdTime = Math.min(stepDur * gate, sizeSec / Math.max(0.25, rate));
+  var att = Math.max(0.002, holdTime * Math.max(0.01, shape) * 0.5);
+  var rel = Math.max(0.01, holdTime * Math.max(0.01, 1 - shape) * 0.5);
+  var g = audioCtx.createGain();
+  g.gain.value = 0;
+  g.gain.setValueAtTime(0, when);
+  g.gain.linearRampToValueAtTime(0.85, when + att);
+  g.gain.setValueAtTime(0.85, when + holdTime - rel);
+  g.gain.linearRampToValueAtTime(0, when + holdTime);
+  bufSrc.connect(g);
+  g.connect(node.audio.output);
+  bufSrc.start(when);
+  bufSrc.stop(when + holdTime + 0.05);
+  var voice = { src: bufSrc, gain: g };
+  node.audio.activeVoices.push(voice);
+  bufSrc.onended = function() {
+    try { bufSrc.disconnect(); } catch(e) {}
+    try { g.disconnect(); } catch(e) {}
+    var idx = node.audio.activeVoices.indexOf(voice);
+    if (idx > -1) node.audio.activeVoices.splice(idx, 1);
+  };
+}
+
 function fireSequencerNote(node, when, stepDur, stepIdx) {
   var basePitch = node.params.pitch || 220;
   var jitter = node.params.jitter || 0;
@@ -2304,6 +2493,7 @@ function modParamRange(nodeType, param) {
     grain: { grainSize: [5, 400], scatter: [0, 1], shape: [0.01, 0.99] },
     grainlab: { grainSize: [5, 400], scatter: [0, 1], shape: [0.01, 0.99], layerSpread: [0, 1] },
     grainchoir: { grainSize: [5, 400], scatter: [0, 1], shape: [0.01, 0.99], detune: [0, 1], spread: [0, 1], warmth: [0, 1] },
+    grainseq: { position: [0, 1], grainSize: [20, 800], shape: [0.01, 0.99] },
     sequencer: { pitch: [40, 880], jitter: [0, 1], gate: [0.05, 0.95] },
     keyboard: { gain: [0, 1] }
   };
@@ -2448,6 +2638,7 @@ function connectAudio() {
     if (n.audio.type === 'sampler') stopSamplerSource(n);
     if (n.audio.type === 'reverse') stopReverseEngine(n);
     if (n.audio.type === 'sequencer') stopSequencer(n);
+    if (n.audio.type === 'grainseq') stopGrainSeq(n);
     if (n.audio.output) try { n.audio.output.disconnect(); } catch(e) {}
     // Disconnect multi-outputs
     if (n.audio.outputs) {
@@ -2464,7 +2655,7 @@ function connectAudio() {
   var grainchoirNeedBuffer = {};
   var reverseNeedStart = {};
 
-  var isGrainLike = function(t) { return t === 'grain' || t === 'grainlab' || t === 'grainchoir'; };
+  var isGrainLike = function(t) { return t === 'grain' || t === 'grainlab' || t === 'grainchoir' || t === 'grainseq'; };
   var isSource = function(t) { return t === 'oscillator' || t === 'noise' || t === 'sampler'; };
 
   wires.forEach(function(w) {
@@ -2571,6 +2762,7 @@ function connectAudio() {
       if (n.type === 'reverse' && reverseNeedStart[n.id]) startReverseEngine(n);
       // Sequencer: always run when playing (it's a self-driving source)
       if (n.type === 'sequencer') startSequencer(n);
+      if (n.type === 'grainseq') startGrainSeq(n);
       // Mod matrix: ensure poll loop is running
       if (n.type === 'modmatrix') startModMatrixPoll(n);
     });
@@ -2654,6 +2846,7 @@ function togglePlay() {
       if (n.audio && n.audio.type === 'sampler') stopSamplerSource(n);
       if (n.audio && n.audio.type === 'reverse') stopReverseEngine(n);
       if (n.audio && n.audio.type === 'sequencer') stopSequencer(n);
+      if (n.audio && n.audio.type === 'grainseq') stopGrainSeq(n);
       if (n.audio && n.audio.type === 'keyboard') stopAllKeyboardVoices(n);
     });
   }
@@ -2881,6 +3074,15 @@ function renderNode(node) {
     html += slider(node, 'gate', 'Gate', 0.05, 0.95, 0.01, 'f2');
     html += slider(node, 'attack', 'Attack', 0.001, 0.2, 0.001, 'f3');
     html += slider(node, 'release', 'Release', 0.01, 1, 0.01, 'f2');
+    html += slider(node, 'gain', 'Gain', 0, 1, 0.01, 'f2');
+  }
+  else if (node.type === 'grainseq') {
+    html += grainSeqGrid(node);
+    html += slider(node, 'bpm', 'BPM', 40, 240, 1, 'i');
+    html += slider(node, 'octave', 'Octave', -3, 3, 1, 'i');
+    html += slider(node, 'position', 'Slice Pos', 0, 1, 0.01, 'f2');
+    html += slider(node, 'grainSize', 'Size', 20, 800, 5, 'ms');
+    html += slider(node, 'shape', 'Shape', 0.01, 0.99, 0.01, 'f2');
     html += slider(node, 'gain', 'Gain', 0, 1, 0.01, 'f2');
   }
   else if (node.type === 'modmatrix') {
@@ -3164,6 +3366,11 @@ function renderNode(node) {
           if (param === 'gain' && node.audio.output) node.audio.output.gain.setTargetAtTime(val, audioCtx.currentTime, 0.05);
           // bpm/pitch/jitter/gate/attack/release picked up at next step
         }
+        // Grain Sequencer
+        if (node.audio.type === 'grainseq') {
+          if (param === 'gain' && node.audio.output) node.audio.output.gain.setTargetAtTime(val, audioCtx.currentTime, 0.05);
+          // bpm/octave/position/grainSize/shape picked up at next step
+        }
       }
       scheduleAutoSave();
     });
@@ -3214,6 +3421,11 @@ function renderNode(node) {
   // Sequencer: step grid clicks
   if (node.type === 'sequencer') {
     bindSequencerNode(node, el);
+  }
+
+  // Grain Sequencer: step click + wheel-pitch
+  if (node.type === 'grainseq') {
+    bindGrainSeqNode(node, el);
   }
 
   // Mod Matrix: dropdown population + change handlers
@@ -3321,6 +3533,20 @@ function seqGrid(node) {
   return html;
 }
 
+function grainSeqGrid(node) {
+  var steps = parseSeqSteps(node.params.steps);
+  var notes = parseSeqNotes(node.params.notes);
+  var html = '<div class="seq-grid pitched">';
+  for (var i = 0; i < 16; i++) {
+    var on = steps[i] ? ' on' : '';
+    var label = steps[i] ? noteName(notes[i]) : (i + 1);
+    html += '<div class="seq-step'+on+'" data-step="'+i+'" title="scroll to change pitch">'+label+'</div>';
+  }
+  html += '</div>';
+  html += '<div class="seq-hint">click step · scroll to pitch</div>';
+  return html;
+}
+
 // ─── KEYBOARD NODE BINDINGS ───
 var focusedKeyboard = null; // node currently receiving physical key events
 
@@ -3422,6 +3648,55 @@ function bindSequencerNode(node, el) {
   el.querySelectorAll('input[type=range][data-param="bpm"]').forEach(function(sl) {
     sl.addEventListener('input', function() {
       // Already updates node.params via slider handler; sequencer uses next iteration
+    });
+  });
+}
+
+// ─── GRAIN SEQUENCER BINDINGS ───
+function bindGrainSeqNode(node, el) {
+  el.querySelectorAll('.seq-step').forEach(function(stepEl) {
+    var idx = parseInt(stepEl.dataset.step);
+    // Click: toggle on/off
+    stepEl.addEventListener('mousedown', function(e) {
+      e.stopPropagation();
+      if (e.button !== 0) return;
+      var steps = parseSeqSteps(node.params.steps);
+      var notes = parseSeqNotes(node.params.notes);
+      steps[idx] = steps[idx] ? 0 : 1;
+      node.params.steps = steps.join('');
+      stepEl.classList.toggle('on', !!steps[idx]);
+      stepEl.textContent = steps[idx] ? noteName(notes[idx]) : (idx + 1);
+      scheduleAutoSave();
+    });
+    // Wheel: change pitch ±1 (shift = ±12 / octave)
+    stepEl.addEventListener('wheel', function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      var notes = parseSeqNotes(node.params.notes);
+      var steps = parseSeqSteps(node.params.steps);
+      var dir = e.deltaY < 0 ? 1 : -1;
+      var step = e.shiftKey ? 12 : 1;
+      notes[idx] = Math.max(-36, Math.min(36, notes[idx] + dir * step));
+      node.params.notes = notes.join(',');
+      // Auto-enable step when pitching
+      if (!steps[idx]) {
+        steps[idx] = 1;
+        node.params.steps = steps.join('');
+        stepEl.classList.add('on');
+      }
+      stepEl.textContent = noteName(notes[idx]);
+      scheduleAutoSave();
+    }, { passive: false });
+    // Right-click: clear pitch to 0 (root)
+    stepEl.addEventListener('contextmenu', function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      var notes = parseSeqNotes(node.params.notes);
+      var steps = parseSeqSteps(node.params.steps);
+      notes[idx] = 0;
+      node.params.notes = notes.join(',');
+      if (steps[idx]) stepEl.textContent = noteName(0);
+      scheduleAutoSave();
     });
   });
 }
@@ -3678,6 +3953,7 @@ canvasEl.addEventListener('contextmenu', function(e) {
       { label: 'Reverse', action: function() { createNode('reverse', cp.x, cp.y); }},
       { label: 'Grain Lab', action: function() { createNode('grainlab', cp.x, cp.y); }},
       { label: 'Grain Choir', action: function() { createNode('grainchoir', cp.x, cp.y); }},
+      { label: 'Grain Sequencer', action: function() { createNode('grainseq', cp.x, cp.y); }},
       { label: 'Filter', action: function() { createNode('filter', cp.x, cp.y); }},
       { label: 'Distortion', action: function() { createNode('distortion', cp.x, cp.y); }},
       { label: 'Bitcrusher', action: function() { createNode('bitcrusher', cp.x, cp.y); }},
