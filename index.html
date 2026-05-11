@@ -237,6 +237,10 @@
   }
   .sampler-drop.loaded { border-color: var(--accent); color: var(--accent); border-style: solid; }
   .sampler-drop input[type=file] { display: none; }
+  .sampler-times {
+    font-family: var(--mono); font-size: 9px; color: var(--ghost);
+    text-align: center; padding: 4px 0 2px; letter-spacing: 0.5px;
+  }
 
   /* ─── NODE CONTROLS ─── */
   .node-ctrl { margin: 8px 0; }
@@ -3453,6 +3457,22 @@ function stopSamplerSource(node) {
   }
 }
 
+function updateSamplerTimeDisplay(node) {
+  if (!node || node.type !== 'sampler' || !node.el) return;
+  var div = node.el.querySelector('.sampler-times');
+  if (!div) return;
+  var buf = node._sampleBuffer;
+  if (!buf) { div.textContent = ''; return; }
+  var dur = buf.duration;
+  var s = (node.params.trimStart || 0) * dur;
+  var e = (node.params.trimEnd || 1) * dur;
+  function fmt(t) {
+    if (t < 1) return (t * 1000).toFixed(0) + 'ms';
+    return t.toFixed(2) + 's';
+  }
+  div.textContent = fmt(s) + ' → ' + fmt(e) + '  (' + fmt(e - s) + ')';
+}
+
 function startReverseEngine(node) {
   // Reverse node is always processing via ScriptProcessor — nothing extra needed
 }
@@ -3697,8 +3717,9 @@ function renderNode(node) {
     html += '<div class="sampler-drop" data-node-id="'+node.id+'"><input type="file" accept="audio/*"><span class="sampler-label">'+(node._sampleName || 'Drop audio file')+'</span></div>';
     html += slider(node, 'playbackRate', 'Rate', 0.1, 4, 0.01, 'f2');
     html += waveButtons(node, [true, false], ['Loop', 'Once'], 'loop');
-    html += slider(node, 'trimStart', 'Trim Start', 0, 1, 0.01, 'f2');
-    html += slider(node, 'trimEnd', 'Trim End', 0, 1, 0.01, 'f2');
+    html += slider(node, 'trimStart', 'Trim Start', 0, 1, 0.001, 'f3');
+    html += slider(node, 'trimEnd', 'Trim End', 0, 1, 0.001, 'f3');
+    html += '<div class="sampler-times" data-node-id="'+node.id+'"></div>';
   }
   else if (node.type === 'reverse') {
     html += slider(node, 'chunkSize', 'Chunk', 0.05, 2, 0.01, 's');
@@ -4020,6 +4041,7 @@ function renderNode(node) {
           if (param === 'trimStart' || param === 'trimEnd') {
             // Restart sampler with new trim
             if (node.audio.sampleBuffer) { stopSamplerSource(node); startSamplerSource(node); }
+            updateSamplerTimeDisplay(node);
           }
         }
         // Reverse
@@ -4103,6 +4125,7 @@ function renderNode(node) {
           if (node.audio) node.audio.sampleBuffer = buffer;
           labelEl.textContent = node._sampleName;
           dropZone.classList.add('loaded');
+          updateSamplerTimeDisplay(node);
           if (isPlaying) connectAudio();
         });
       };
@@ -4122,7 +4145,7 @@ function renderNode(node) {
       if (e.dataTransfer.files.length > 0) loadSamplerFile(e.dataTransfer.files[0]);
     });
     // Mark loaded state if buffer already exists
-    if (node._sampleBuffer) dropZone.classList.add('loaded');
+    if (node._sampleBuffer) { dropZone.classList.add('loaded'); updateSamplerTimeDisplay(node); }
   }
 
   // Keyboard: mouse click + focus
@@ -5170,6 +5193,7 @@ function loadPatch(data) {
         var labelEl = dropEl.querySelector('.sampler-label');
         if (labelEl) labelEl.textContent = sd.node._sampleName || 'Sample';
       }
+      updateSamplerTimeDisplay(sd.node);
     });
   });
 }
