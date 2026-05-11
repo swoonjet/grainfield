@@ -678,7 +678,7 @@ var NODE_DEFS = {
   },
   strudel: {
     category: 'Source', title: 'Strudel', inputs: [], outputs: ['audio'],
-    params: { code: 'note("c3 eb3 g3 bb3").s("sawtooth").lpf(800)' }
+    params: { code: 'stack(\n  s("bd*4"),\n  s("~ cp ~ cp"),\n  s("hh*8").gain(0.35),\n  s("[~ oh]*4").gain(0.45)\n).cpm(118/4)' }
   },
   mixer: {
     category: 'Utility', title: 'Mixer', inputs: ['audio'], outputs: ['audio'],
