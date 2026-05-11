@@ -3188,9 +3188,15 @@ function attemptStrudelBusSetup(api) {
 }
 
 function evalStrudelNode(node) {
-  if (!node.audio || node.audio.type !== 'strudel') return;
+  if (node.type !== 'strudel') return;
   initAudio();
   if (audioCtx.state === 'suspended') audioCtx.resume();
+  // Strudel evaluates without needing the global Activate state, so the audio
+  // graph (wires) may not be wired up yet. Build any missing node audio and
+  // run connectAudio so Strudel's output flows through the user's chain.
+  nodes.forEach(function(n) { if (!n.audio) buildNodeAudio(n); });
+  connectAudio();
+  if (!node.audio) return;
   setStrudelStatus(node, 'loading…', 'loading');
   var statusFn = function(msg) { setStrudelStatus(node, msg, 'loading'); };
   loadStrudelLib(statusFn).then(function(api) {
