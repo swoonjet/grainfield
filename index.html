@@ -453,6 +453,7 @@
       <div class="add-menu-item" data-type="oscillator"><span class="item-name">Oscillator</span><span class="item-desc">tone</span></div>
       <div class="add-menu-item" data-type="noise"><span class="item-name">Noise</span><span class="item-desc">texture</span></div>
       <div class="add-menu-item" data-type="lfo"><span class="item-name">LFO</span><span class="item-desc">modulate</span></div>
+      <div class="add-menu-item" data-type="smoothlfo"><span class="item-name">Smooth LFO</span><span class="item-desc">organic mod</span></div>
       <div class="add-menu-item" data-type="sampler"><span class="item-name">Sampler</span><span class="item-desc">sample</span></div>
       <div class="add-menu-item" data-type="keyboard"><span class="item-name">Keyboard</span><span class="item-desc">play</span></div>
       <div class="add-menu-item" data-type="sequencer"><span class="item-name">Sequencer</span><span class="item-desc">16-step</span></div>
@@ -469,6 +470,9 @@
       <div class="add-menu-item" data-type="grainseq"><span class="item-name">Grain Sequencer</span><span class="item-desc">pitched slices</span></div>
       <div class="add-menu-item" data-type="filter"><span class="item-name">Filter</span><span class="item-desc">shape</span></div>
       <div class="add-menu-item" data-type="distortion"><span class="item-name">Distortion</span><span class="item-desc">crunch</span></div>
+      <div class="add-menu-item" data-type="tubesat"><span class="item-name">Tube Sat</span><span class="item-desc">warm clip</span></div>
+      <div class="add-menu-item" data-type="tapesat"><span class="item-name">Tape Sat</span><span class="item-desc">tape glue</span></div>
+      <div class="add-menu-item" data-type="ladder"><span class="item-name">Ladder Filter</span><span class="item-desc">moog</span></div>
       <div class="add-menu-item" data-type="bitcrusher"><span class="item-name">Bitcrusher</span><span class="item-desc">lo-fi</span></div>
       <div class="add-menu-item" data-type="harmonics"><span class="item-name">Harmonics</span><span class="item-desc">partials</span></div>
       <div class="add-menu-item" data-type="compressor"><span class="item-name">Compressor</span><span class="item-desc">dynamics</span></div>
@@ -481,6 +485,7 @@
       <div class="add-menu-item" data-type="phaser"><span class="item-name">Phaser</span><span class="item-desc">sweep</span></div>
       <div class="add-menu-item" data-type="shimmer"><span class="item-name">Shimmer</span><span class="item-desc">lush</span></div>
       <div class="add-menu-item" data-type="tapeloop"><span class="item-name">Tape Loop</span><span class="item-desc">analog</span></div>
+      <div class="add-menu-item" data-type="wowflutter"><span class="item-name">Wow &amp; Flutter</span><span class="item-desc">pitch drift</span></div>
       <div class="add-menu-divider"></div>
       <div class="add-menu-cat">Utility</div>
       <div class="add-menu-item" data-type="mixer"><span class="item-name">Mixer</span><span class="item-desc">vol + pan</span></div>
@@ -672,6 +677,26 @@ var NODE_DEFS = {
   mixer: {
     category: 'Utility', title: 'Mixer', inputs: ['audio'], outputs: ['audio'],
     params: { gain: 0.8, pan: 0 }
+  },
+  tubesat: {
+    category: 'Process', title: 'Tube Sat', inputs: ['audio'], outputs: ['audio'],
+    params: { drive: 6, bias: 0.4, tone: 0.6, mix: 0.7 }
+  },
+  tapesat: {
+    category: 'Process', title: 'Tape Sat', inputs: ['audio'], outputs: ['audio'],
+    params: { drive: 5, bump: 0.6, tone: 0.5, mix: 0.7 }
+  },
+  wowflutter: {
+    category: 'Effect', title: 'Wow & Flutter', inputs: ['audio'], outputs: ['audio'],
+    params: { wow: 0.35, flutter: 0.3, drift: 0.25, mix: 1.0 }
+  },
+  ladder: {
+    category: 'Process', title: 'Ladder Filter', inputs: ['audio'], outputs: ['audio'],
+    params: { cutoff: 800, resonance: 0.5, drive: 0.3, mix: 1.0 }
+  },
+  smoothlfo: {
+    category: 'Source', title: 'Smooth LFO', inputs: [], outputs: ['audio'],
+    params: { shape: 'smooth', rate: 0.5, depth: 0.7 }
   },
   output: {
     category: 'Output', title: 'Master Out', inputs: ['audio'], outputs: [],
@@ -1385,6 +1410,172 @@ function buildNodeAudio(node) {
     }
     node.audio = { type: 'strudel', output: output, playing: false, routedToBus: routed };
   }
+  else if (t === 'tubesat') {
+    // Tube: asymmetric soft-clip with post-shape lowpass for warmth.
+    // EQ applied to the COMBINED dry+wet so both paths are spectrally identical —
+    // the only difference between them is the memoryless waveshaper, which has
+    // no phase shift. This eliminates the comb-filter artifact.
+    var input = audioCtx.createGain();
+    var ws = audioCtx.createWaveShaper();
+    var dry = audioCtx.createGain();
+    var wet = audioCtx.createGain();
+    var mixOut = audioCtx.createGain();
+    var tone = audioCtx.createBiquadFilter();
+    var output = audioCtx.createGain();
+    ws.curve = buildTubeCurve(node.params.drive || 6, node.params.bias || 0.4);
+    ws.oversample = '4x';
+    tone.type = 'lowpass';
+    tone.frequency.value = 1200 + (node.params.tone || 0.6) * 8800;
+    tone.Q.value = 0.5;
+    var mix = node.params.mix == null ? 0.7 : node.params.mix;
+    dry.gain.value = 1 - mix; wet.gain.value = mix;
+    input.connect(dry);
+    input.connect(ws);
+    ws.connect(wet);
+    dry.connect(mixOut); wet.connect(mixOut);
+    mixOut.connect(tone);
+    tone.connect(output);
+    node.audio = { type: 'tubesat', input:input, output:output, ws:ws, tone:tone, dry:dry, wet:wet, mixOut:mixOut };
+  }
+  else if (t === 'tapesat') {
+    // Tape: bass bloom + symmetric soft-clip + treble rolloff. Bump applied
+    // BEFORE the dry/wet split so both paths are spectrally aligned. DeEq
+    // applied AFTER the mix so dry and wet get the same treble rolloff.
+    var input = audioCtx.createGain();
+    var bump = audioCtx.createBiquadFilter();
+    var ws = audioCtx.createWaveShaper();
+    var dry = audioCtx.createGain();
+    var wet = audioCtx.createGain();
+    var mixOut = audioCtx.createGain();
+    var deEq = audioCtx.createBiquadFilter();
+    var output = audioCtx.createGain();
+    bump.type = 'lowshelf';
+    bump.frequency.value = 150;
+    bump.gain.value = (node.params.bump || 0.6) * 8;
+    ws.curve = buildTapeCurve(node.params.drive || 5);
+    ws.oversample = '4x';
+    deEq.type = 'lowpass';
+    deEq.frequency.value = 1500 + (node.params.tone || 0.5) * 6500;
+    deEq.Q.value = 0.5;
+    var mix = node.params.mix == null ? 0.7 : node.params.mix;
+    dry.gain.value = 1 - mix; wet.gain.value = mix;
+    input.connect(bump);
+    bump.connect(dry);
+    bump.connect(ws);
+    ws.connect(wet);
+    dry.connect(mixOut); wet.connect(mixOut);
+    mixOut.connect(deEq);
+    deEq.connect(output);
+    node.audio = { type: 'tapesat', input:input, output:output, bump:bump, ws:ws, deEq:deEq, dry:dry, wet:wet, mixOut:mixOut };
+  }
+  else if (t === 'wowflutter') {
+    // Pitch instability — modulated short delay line (Doppler shift via delay time)
+    var input = audioCtx.createGain();
+    var dry = audioCtx.createGain();
+    var wet = audioCtx.createGain();
+    var output = audioCtx.createGain();
+    var mix = node.params.mix == null ? 1.0 : node.params.mix;
+    dry.gain.value = 1 - mix; wet.gain.value = mix;
+    // Base delay sits at 30ms — large enough that wow+flutter+drift cannot
+    // drive delayTime below zero at max settings (max combined deviation ~22ms).
+    var del = audioCtx.createDelay(0.5);
+    del.delayTime.value = 0.030;
+    // Wow — slow sine (peak deviation up to 14ms)
+    var wowLfo = audioCtx.createOscillator();
+    wowLfo.type = 'sine';
+    wowLfo.frequency.value = 0.6;
+    var wowGain = audioCtx.createGain();
+    wowGain.gain.value = (node.params.wow || 0.3) * 0.014;
+    wowLfo.connect(wowGain);
+    wowGain.connect(del.delayTime);
+    wowLfo.start();
+    // Flutter — two detuned sines summed (irregular faster wobble, peak ~4ms)
+    var fl1 = audioCtx.createOscillator();
+    fl1.type = 'sine'; fl1.frequency.value = 7.3;
+    var fl2 = audioCtx.createOscillator();
+    fl2.type = 'sine'; fl2.frequency.value = 11.7;
+    var flutterGain = audioCtx.createGain();
+    flutterGain.gain.value = (node.params.flutter || 0.3) * 0.004;
+    fl1.connect(flutterGain);
+    fl2.connect(flutterGain);
+    flutterGain.connect(del.delayTime);
+    fl1.start(); fl2.start();
+    // Drift — slow band-limited noise (Brownian wander, peak ~5ms)
+    var driftBuf = buildSmoothLfoBuffer(audioCtx, 'smooth');
+    var driftSrc = audioCtx.createBufferSource();
+    driftSrc.buffer = driftBuf;
+    driftSrc.loop = true;
+    driftSrc.playbackRate.value = 0.18;
+    var driftGain = audioCtx.createGain();
+    driftGain.gain.value = (node.params.drift || 0.2) * 0.005;
+    driftSrc.connect(driftGain);
+    driftGain.connect(del.delayTime);
+    driftSrc.start();
+    input.connect(dry); dry.connect(output);
+    input.connect(del);
+    del.connect(wet);
+    wet.connect(output);
+    node.audio = {
+      type: 'wowflutter', input:input, output:output, dry:dry, wet:wet,
+      delay:del, wowLfo:wowLfo, wowGain:wowGain,
+      fl1:fl1, fl2:fl2, flutterGain:flutterGain,
+      driftSrc:driftSrc, driftGain:driftGain
+    };
+  }
+  else if (t === 'ladder') {
+    // Moog-style ladder — 4 cascaded LP biquads + soft-saturated feedback
+    var input = audioCtx.createGain();
+    var dry = audioCtx.createGain();
+    var wet = audioCtx.createGain();
+    var output = audioCtx.createGain();
+    var mix = node.params.mix == null ? 1.0 : node.params.mix;
+    dry.gain.value = 1 - mix; wet.gain.value = mix;
+    var pre = audioCtx.createGain();
+    pre.gain.value = 1 + (node.params.drive || 0.3) * 4;
+    var sum = audioCtx.createGain();
+    pre.connect(sum);
+    var poles = [];
+    var prev = sum;
+    var cutoff = node.params.cutoff || 1200;
+    for (var lp = 0; lp < 4; lp++) {
+      var f = audioCtx.createBiquadFilter();
+      f.type = 'lowpass';
+      f.frequency.value = cutoff;
+      // Butterworth Q for clean Bessel-like cascade — Q=0 is undefined behavior
+      f.Q.value = 0.707;
+      prev.connect(f);
+      prev = f;
+      poles.push(f);
+    }
+    var fbWs = audioCtx.createWaveShaper();
+    fbWs.curve = buildSoftTanh(2.5);
+    fbWs.oversample = '2x';
+    var fbGain = audioCtx.createGain();
+    fbGain.gain.value = -(node.params.resonance || 0.4) * 3.6;
+    prev.connect(fbWs);
+    fbWs.connect(fbGain);
+    fbGain.connect(sum);
+    input.connect(dry); dry.connect(output);
+    input.connect(pre);
+    prev.connect(wet);
+    wet.connect(output);
+    node.audio = {
+      type: 'ladder', input:input, output:output, dry:dry, wet:wet,
+      pre:pre, sum:sum, poles:poles, fbWs:fbWs, fbGain:fbGain
+    };
+  }
+  else if (t === 'smoothlfo') {
+    // Organic modulation — band-limited noise / random walk / sample-and-hold
+    var src = audioCtx.createBufferSource();
+    src.buffer = buildSmoothLfoBuffer(audioCtx, node.params.shape || 'smooth');
+    src.loop = true;
+    src.playbackRate.value = (node.params.rate || 0.5) / 0.5;
+    var depthGain = audioCtx.createGain();
+    depthGain.gain.value = node.params.depth || 0.7;
+    src.connect(depthGain);
+    src.start();
+    node.audio = { type: 'smoothlfo', src: src, output: depthGain, depthGain: depthGain };
+  }
   else if (t === 'modmatrix') {
     var input = audioCtx.createGain();
     input.gain.value = 1.0;
@@ -1534,6 +1725,42 @@ function destroyNodeAudio(node) {
   if (node.audio.type === 'strudel') {
     if (node.audio.playing) stopStrudelNode(node);
   }
+  if (node.audio.type === 'tubesat') {
+    try { node.audio.ws.disconnect(); } catch(e) {}
+    try { node.audio.tone.disconnect(); } catch(e) {}
+    try { node.audio.mixOut.disconnect(); } catch(e) {}
+  }
+  if (node.audio.type === 'tapesat') {
+    try { node.audio.bump.disconnect(); } catch(e) {}
+    try { node.audio.ws.disconnect(); } catch(e) {}
+    try { node.audio.deEq.disconnect(); } catch(e) {}
+    try { node.audio.mixOut.disconnect(); } catch(e) {}
+  }
+  if (node.audio.type === 'wowflutter') {
+    try { node.audio.wowLfo.stop(); } catch(e) {}
+    try { node.audio.wowLfo.disconnect(); } catch(e) {}
+    try { node.audio.fl1.stop(); } catch(e) {}
+    try { node.audio.fl1.disconnect(); } catch(e) {}
+    try { node.audio.fl2.stop(); } catch(e) {}
+    try { node.audio.fl2.disconnect(); } catch(e) {}
+    try { node.audio.driftSrc.stop(); } catch(e) {}
+    try { node.audio.driftSrc.disconnect(); } catch(e) {}
+    try { node.audio.wowGain.disconnect(); } catch(e) {}
+    try { node.audio.flutterGain.disconnect(); } catch(e) {}
+    try { node.audio.driftGain.disconnect(); } catch(e) {}
+    try { node.audio.delay.disconnect(); } catch(e) {}
+  }
+  if (node.audio.type === 'ladder') {
+    if (node.audio.poles) node.audio.poles.forEach(function(p) { try { p.disconnect(); } catch(e) {} });
+    try { node.audio.fbWs.disconnect(); } catch(e) {}
+    try { node.audio.fbGain.disconnect(); } catch(e) {}
+    try { node.audio.pre.disconnect(); } catch(e) {}
+    try { node.audio.sum.disconnect(); } catch(e) {}
+  }
+  if (node.audio.type === 'smoothlfo') {
+    try { node.audio.src.stop(); } catch(e) {}
+    try { node.audio.src.disconnect(); } catch(e) {}
+  }
   if (node.audio.output) try { node.audio.output.disconnect(); } catch(e) {}
   if (node.audio.input) try { node.audio.input.disconnect(); } catch(e) {}
   node.audio = null;
@@ -1570,6 +1797,131 @@ function rebuildHarmonics(node) {
   var wasConnected = wires.filter(function(w) { return w.from === node.id || w.to === node.id; });
   buildNodeAudio(node);
   if (isPlaying) connectAudio();
+}
+
+function buildTubeCurve(drive, bias) {
+  // Asymmetric variant of the proven rational soft-clip used by Distortion:
+  //   y = (π + d) · x / (π + d · |x|)
+  // Effective drive d varies smoothly across x=0 via tanh — generating
+  // genuine even-harmonic content without a derivative discontinuity.
+  // Bias multiplier raised to 1.5 so default bias=0.4 gives audible
+  // asymmetric character (positive side compresses ~2.7× harder).
+  var n = 8192;
+  var c = new Float32Array(n);
+  for (var i = 0; i < n; i++) {
+    var x = (i * 2) / n - 1;
+    var d = drive * (1 + bias * Math.tanh(x * 4) * 1.5);
+    if (d < 0.1) d = 0.1;
+    c[i] = ((Math.PI + d) * x) / (Math.PI + d * Math.abs(x));
+  }
+  return c;
+}
+
+function rebuildTubeCurve(node) {
+  if (!node.audio || node.audio.type !== 'tubesat') return;
+  node.audio.ws.curve = buildTubeCurve(node.params.drive || 3, node.params.bias || 0.2);
+}
+
+function buildTapeCurve(drive) {
+  // Symmetric rational soft-clip — same proven formula as Distortion, with a
+  // 2× drive scale so the slider sweeps across a useful musical range.
+  var n = 8192;
+  var c = new Float32Array(n);
+  var d = drive * 2;
+  for (var i = 0; i < n; i++) {
+    var x = (i * 2) / n - 1;
+    c[i] = ((Math.PI + d) * x) / (Math.PI + d * Math.abs(x));
+  }
+  return c;
+}
+
+function rebuildTapeCurve(node) {
+  if (!node.audio || node.audio.type !== 'tapesat') return;
+  node.audio.ws.curve = buildTapeCurve(node.params.drive || 3);
+}
+
+function buildSoftTanh(k) {
+  var n = 4096;
+  var c = new Float32Array(n);
+  var norm = Math.tanh(k);
+  if (norm === 0) norm = 1;
+  for (var i = 0; i < n; i++) {
+    var x = (i * 2) / n - 1;
+    c[i] = Math.tanh(k * x) / norm;
+  }
+  return c;
+}
+
+function buildSmoothLfoBuffer(ctx, shape) {
+  // ~2-second seamlessly-looping mod source in [-1, 1].
+  // Shape determines the curve flavor: smooth (sines), walk (Brownian), sh (sample-and-hold).
+  var rate = ctx.sampleRate;
+  var durationSec = 2;
+  var len = Math.floor(rate * durationSec);
+  var buf = ctx.createBuffer(1, len, rate);
+  var d = buf.getChannelData(0);
+  var i;
+  if (shape === 'walk') {
+    var temp = new Float32Array(len);
+    var x = 0;
+    for (i = 0; i < len; i++) {
+      x += (Math.random() - 0.5) * 0.01;
+      x -= x * 0.0002; // gentle restoring force
+      temp[i] = x;
+    }
+    // Force seamless loop by linear tilt so temp[len-1] meets temp[0]
+    var diff = temp[len - 1] - temp[0];
+    for (i = 0; i < len; i++) temp[i] -= diff * (i / (len - 1));
+    var mx = 0;
+    for (i = 0; i < len; i++) if (Math.abs(temp[i]) > mx) mx = Math.abs(temp[i]);
+    var inv = mx > 0 ? 1 / mx : 1;
+    for (i = 0; i < len; i++) d[i] = temp[i] * inv;
+  } else if (shape === 'sh') {
+    var steps = 8;
+    var stepVals = [];
+    for (var s = 0; s < steps; s++) stepVals.push(Math.random() * 2 - 1);
+    var stepLen = Math.floor(len / steps);
+    for (i = 0; i < len; i++) {
+      var idx = Math.min(steps - 1, Math.floor(i / stepLen));
+      d[i] = stepVals[idx];
+    }
+  } else {
+    // smooth: sum of integer-harmonic sines with random amp+phase — loops seamlessly
+    var harmonics = [];
+    for (var k = 1; k <= 5; k++) {
+      harmonics.push({
+        n: k,
+        amp: (Math.random() * 0.6 + 0.4) / k,
+        phase: Math.random() * Math.PI * 2
+      });
+    }
+    var ampSum = 0;
+    for (var h = 0; h < harmonics.length; h++) ampSum += harmonics[h].amp;
+    if (ampSum === 0) ampSum = 1;
+    for (i = 0; i < len; i++) {
+      var t = i / len;
+      var sm = 0;
+      for (var h2 = 0; h2 < harmonics.length; h2++) {
+        sm += harmonics[h2].amp * Math.sin(2 * Math.PI * harmonics[h2].n * t + harmonics[h2].phase);
+      }
+      d[i] = sm / ampSum;
+    }
+  }
+  return buf;
+}
+
+function rebuildSmoothLfo(node) {
+  if (!audioCtx || !node.audio || node.audio.type !== 'smoothlfo') return;
+  var a = node.audio;
+  try { a.src.stop(); } catch(e) {}
+  try { a.src.disconnect(); } catch(e) {}
+  var src = audioCtx.createBufferSource();
+  src.buffer = buildSmoothLfoBuffer(audioCtx, node.params.shape || 'smooth');
+  src.loop = true;
+  src.playbackRate.value = (node.params.rate || 0.5) / 0.5;
+  src.connect(a.depthGain);
+  src.start();
+  a.src = src;
 }
 
 // ─── GRAIN SPAWNING ───
@@ -2558,7 +2910,12 @@ function modParamRange(nodeType, param) {
     grainchoir: { grainSize: [5, 400], scatter: [0, 1], shape: [0.01, 0.99], detune: [0, 1], spread: [0, 1], warmth: [0, 1] },
     grainseq: { position: [0, 1], grainSize: [20, 800], shape: [0.01, 0.99] },
     sequencer: { pitch: [40, 880], jitter: [0, 1], gate: [0.05, 0.95] },
-    keyboard: { gain: [0, 1] }
+    keyboard: { gain: [0, 1] },
+    tubesat: { drive: [0.5, 12], bias: [-0.6, 0.6], tone: [0, 1], mix: [0, 1] },
+    tapesat: { drive: [0.5, 12], bump: [0, 1], tone: [0, 1], mix: [0, 1] },
+    wowflutter: { wow: [0, 1], flutter: [0, 1], drift: [0, 1], mix: [0, 1] },
+    ladder: { cutoff: [30, 8000], resonance: [0, 1.0], drive: [0, 1], mix: [0, 1] },
+    smoothlfo: { rate: [0.05, 8], depth: [0, 1] }
   };
   var t = R[nodeType];
   if (t && t[param]) return { min: t[param][0], max: t[param][1] };
@@ -2598,6 +2955,28 @@ function applyParamRealtime(node, param, val) {
   }
   else if (t === 'grainchoir' && param === 'warmth' && a.warmthFilter) {
     setNow(a.warmthFilter.frequency, 20000 * Math.pow(0.1, val));
+  }
+  else if (t === 'tubesat') {
+    if (param === 'tone' && a.tone) setNow(a.tone.frequency, 1200 + val * 8800);
+    // drive/bias require curve rebuild — skipped on the audio-rate poll loop
+  }
+  else if (t === 'tapesat') {
+    if (param === 'tone' && a.deEq) setNow(a.deEq.frequency, 1500 + val * 6500);
+    if (param === 'bump' && a.bump) setNow(a.bump.gain, val * 8);
+  }
+  else if (t === 'wowflutter') {
+    if (param === 'wow' && a.wowGain) setNow(a.wowGain.gain, val * 0.014);
+    if (param === 'flutter' && a.flutterGain) setNow(a.flutterGain.gain, val * 0.004);
+    if (param === 'drift' && a.driftGain) setNow(a.driftGain.gain, val * 0.005);
+  }
+  else if (t === 'ladder') {
+    if (param === 'cutoff' && a.poles) a.poles.forEach(function(p) { setNow(p.frequency, val); });
+    if (param === 'resonance' && a.fbGain) setNow(a.fbGain.gain, -val * 3.6);
+    if (param === 'drive' && a.pre) setNow(a.pre.gain, 1 + val * 4);
+  }
+  else if (t === 'smoothlfo') {
+    if (param === 'rate' && a.src) setNow(a.src.playbackRate, val / 0.5);
+    if (param === 'depth' && a.depthGain) setNow(a.depthGain.gain, val);
   }
   // grain* size/scatter/shape/etc: just write node.params, picked up by next spawn
 }
@@ -3096,6 +3475,12 @@ function togglePlay() {
       if (n.audio && n.audio.type === 'sequencer') stopSequencer(n);
       if (n.audio && n.audio.type === 'grainseq') stopGrainSeq(n);
       if (n.audio && n.audio.type === 'keyboard') stopAllKeyboardVoices(n);
+      // Nodes with persistent internal sources or self-oscillating feedback:
+      // tear down completely so the activate path rebuilds them fresh.
+      if (n.audio && (n.audio.type === 'smoothlfo' || n.audio.type === 'wowflutter' || n.audio.type === 'ladder')) {
+        destroyNodeAudio(n);
+        n.audio = null;
+      }
     });
   }
   updatePlayUI();
@@ -3225,6 +3610,35 @@ function renderNode(node) {
     html += slider(node, 'wow', 'Wow', 0, 1, 0.01, 'f2');
     html += slider(node, 'flutter', 'Flutter', 0, 1, 0.01, 'f2');
     html += slider(node, 'mix', 'Mix', 0, 1, 0.01, 'f2');
+  }
+  else if (node.type === 'tubesat') {
+    html += slider(node, 'drive', 'Drive', 0.5, 12, 0.1, 'f1');
+    html += slider(node, 'bias', 'Bias', -0.6, 0.6, 0.01, 'f2');
+    html += slider(node, 'tone', 'Tone', 0, 1, 0.01, 'f2');
+    html += slider(node, 'mix', 'Mix', 0, 1, 0.01, 'f2');
+  }
+  else if (node.type === 'tapesat') {
+    html += slider(node, 'drive', 'Drive', 0.5, 12, 0.1, 'f1');
+    html += slider(node, 'bump', 'Low Bump', 0, 1, 0.01, 'f2');
+    html += slider(node, 'tone', 'Tone', 0, 1, 0.01, 'f2');
+    html += slider(node, 'mix', 'Mix', 0, 1, 0.01, 'f2');
+  }
+  else if (node.type === 'wowflutter') {
+    html += slider(node, 'wow', 'Wow', 0, 1, 0.01, 'f2');
+    html += slider(node, 'flutter', 'Flutter', 0, 1, 0.01, 'f2');
+    html += slider(node, 'drift', 'Drift', 0, 1, 0.01, 'f2');
+    html += slider(node, 'mix', 'Mix', 0, 1, 0.01, 'f2');
+  }
+  else if (node.type === 'ladder') {
+    html += slider(node, 'cutoff', 'Cutoff', 30, 8000, 1, 'hz');
+    html += slider(node, 'resonance', 'Reso', 0, 1.0, 0.01, 'f2');
+    html += slider(node, 'drive', 'Drive', 0, 1, 0.01, 'f2');
+    html += slider(node, 'mix', 'Mix', 0, 1, 0.01, 'f2');
+  }
+  else if (node.type === 'smoothlfo') {
+    html += waveButtons(node, ['smooth','walk','sh'], ['Smooth','Walk','S&H'], 'shape');
+    html += slider(node, 'rate', 'Rate', 0.05, 8, 0.05, 'f2');
+    html += slider(node, 'depth', 'Depth', 0, 1, 0.01, 'f2');
   }
   else if (node.type === 'lfo') {
     html += waveButtons(node, ['sine','triangle','sawtooth','square'], ['Sin','Tri','Saw','Sqr'], 'lfoWave');
@@ -3467,6 +3881,9 @@ function renderNode(node) {
         if (paramName === 'algorithm') {
           // Grain Lab algorithm change — just store param, takes effect on next grain
         }
+        if (paramName === 'shape' && node.audio && node.audio.type === 'smoothlfo') {
+          rebuildSmoothLfo(node);
+        }
         if (paramName === 'harmony' && node.audio && node.audio.type === 'grainchoir') {
           // Harmony change — restart engine to apply new intervals
           connectAudio();
@@ -3629,6 +4046,36 @@ function renderNode(node) {
         if (node.audio.type === 'grainseq') {
           if (param === 'gain' && node.audio.output) node.audio.output.gain.setTargetAtTime(val, audioCtx.currentTime, 0.05);
           // bpm/octave/position/grainSize/shape picked up at next step
+        }
+        // Tube Sat
+        if (node.audio.type === 'tubesat') {
+          if (param === 'drive' || param === 'bias') rebuildTubeCurve(node);
+          if (param === 'tone' && node.audio.tone) node.audio.tone.frequency.setTargetAtTime(1200 + val * 8800, audioCtx.currentTime, 0.05);
+        }
+        // Tape Sat
+        if (node.audio.type === 'tapesat') {
+          if (param === 'drive') rebuildTapeCurve(node);
+          if (param === 'bump' && node.audio.bump) node.audio.bump.gain.setTargetAtTime(val * 8, audioCtx.currentTime, 0.05);
+          if (param === 'tone' && node.audio.deEq) node.audio.deEq.frequency.setTargetAtTime(1500 + val * 6500, audioCtx.currentTime, 0.05);
+        }
+        // Wow & Flutter
+        if (node.audio.type === 'wowflutter') {
+          if (param === 'wow' && node.audio.wowGain) node.audio.wowGain.gain.setTargetAtTime(val * 0.014, audioCtx.currentTime, 0.05);
+          if (param === 'flutter' && node.audio.flutterGain) node.audio.flutterGain.gain.setTargetAtTime(val * 0.004, audioCtx.currentTime, 0.05);
+          if (param === 'drift' && node.audio.driftGain) node.audio.driftGain.gain.setTargetAtTime(val * 0.005, audioCtx.currentTime, 0.05);
+        }
+        // Ladder Filter
+        if (node.audio.type === 'ladder') {
+          if (param === 'cutoff' && node.audio.poles) {
+            node.audio.poles.forEach(function(p) { p.frequency.setTargetAtTime(val, audioCtx.currentTime, 0.03); });
+          }
+          if (param === 'resonance' && node.audio.fbGain) node.audio.fbGain.gain.setTargetAtTime(-val * 3.6, audioCtx.currentTime, 0.05);
+          if (param === 'drive' && node.audio.pre) node.audio.pre.gain.setTargetAtTime(1 + val * 4, audioCtx.currentTime, 0.05);
+        }
+        // Smooth LFO
+        if (node.audio.type === 'smoothlfo') {
+          if (param === 'rate' && node.audio.src) node.audio.src.playbackRate.setTargetAtTime(val / 0.5, audioCtx.currentTime, 0.05);
+          if (param === 'depth' && node.audio.depthGain) node.audio.depthGain.gain.setTargetAtTime(val, audioCtx.currentTime, 0.05);
         }
       }
       scheduleAutoSave();
@@ -4298,6 +4745,7 @@ canvasEl.addEventListener('contextmenu', function(e) {
       { label: 'Oscillator', action: function() { createNode('oscillator', cp.x, cp.y); }},
       { label: 'Noise', action: function() { createNode('noise', cp.x, cp.y); }},
       { label: 'LFO', action: function() { createNode('lfo', cp.x, cp.y); }},
+      { label: 'Smooth LFO', action: function() { createNode('smoothlfo', cp.x, cp.y); }},
       { label: 'Sampler', action: function() { createNode('sampler', cp.x, cp.y); }},
       { label: 'Keyboard', action: function() { createNode('keyboard', cp.x, cp.y); }},
       { label: 'Sequencer', action: function() { createNode('sequencer', cp.x, cp.y); }},
@@ -4310,6 +4758,9 @@ canvasEl.addEventListener('contextmenu', function(e) {
       { label: 'Grain Sequencer', action: function() { createNode('grainseq', cp.x, cp.y); }},
       { label: 'Filter', action: function() { createNode('filter', cp.x, cp.y); }},
       { label: 'Distortion', action: function() { createNode('distortion', cp.x, cp.y); }},
+      { label: 'Tube Sat', action: function() { createNode('tubesat', cp.x, cp.y); }},
+      { label: 'Tape Sat', action: function() { createNode('tapesat', cp.x, cp.y); }},
+      { label: 'Ladder Filter', action: function() { createNode('ladder', cp.x, cp.y); }},
       { label: 'Bitcrusher', action: function() { createNode('bitcrusher', cp.x, cp.y); }},
       { label: 'Harmonics', action: function() { createNode('harmonics', cp.x, cp.y); }},
       { label: 'Compressor', action: function() { createNode('compressor', cp.x, cp.y); }},
@@ -4320,6 +4771,7 @@ canvasEl.addEventListener('contextmenu', function(e) {
       { label: 'Phaser', action: function() { createNode('phaser', cp.x, cp.y); }},
       { label: 'Shimmer', action: function() { createNode('shimmer', cp.x, cp.y); }},
       { label: 'Tape Loop', action: function() { createNode('tapeloop', cp.x, cp.y); }},
+      { label: 'Wow & Flutter', action: function() { createNode('wowflutter', cp.x, cp.y); }},
       { label: 'Mixer', action: function() { createNode('mixer', cp.x, cp.y); }},
       { label: 'Master Out', action: function() { createNode('output', cp.x, cp.y); }}
     ]);
