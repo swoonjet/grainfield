@@ -2924,8 +2924,12 @@ function modParamRange(nodeType, param) {
 
 // Apply a value to a node param in real time (audio + cached node.params)
 function applyParamRealtime(node, param, val) {
+  // NOTE: do NOT write back to node.params[param]. This function is only
+  // called from the Mod Matrix poll loop. node.params holds the user's
+  // slider position — the immutable "base" the matrix modulates around.
+  // Overwriting it caused the base to drift each frame, which produced
+  // an audible periodic ramping/wander across any modulated parameter.
   if (!node || !node.audio || !audioCtx) return;
-  node.params[param] = val;
   var a = node.audio;
   var t = a.type;
   var ct = audioCtx.currentTime;
