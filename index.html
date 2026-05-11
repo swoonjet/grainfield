@@ -5157,6 +5157,13 @@ function loadPatch(data) {
     panY = data.viewport.panY || 0;
     zoom = data.viewport.zoom || 1;
   }
+  // Migrate: replace old Strudel default (sawtooth note pattern) with current default
+  var OLD_STRUDEL_DEFAULTS = ['note("c3 eb3 g3 bb3").s("sawtooth").lpf(800)'];
+  data.nodes.forEach(function(nd) {
+    if (nd.type === 'strudel' && nd.params && OLD_STRUDEL_DEFAULTS.indexOf(nd.params.code) > -1) {
+      nd.params.code = NODE_DEFS.strudel.params.code;
+    }
+  });
   // Recreate nodes
   var samplerDecodes = [];
   data.nodes.forEach(function(nd) {
