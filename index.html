@@ -112,6 +112,8 @@
   .sl-item:hover { background: var(--active-dim); color: var(--active); }
   .sl-item .sl-meta { font-size: 9px; color: var(--ghost); margin-left: 8px; }
   .sl-sep { height: 1px; background: var(--border); margin: 4px 0; }
+  .sl-item.sl-danger { color: var(--warn); }
+  .sl-item.sl-danger:hover { background: rgba(232,160,144,0.15); color: var(--warn); }
 
   /* ─── CANVAS ─── */
   .canvas {
@@ -5296,6 +5298,8 @@ function buildLoadMenu() {
       : 'Slot ' + i + '<span class="sl-meta">empty</span>';
     html += '<div class="sl-item" data-action="load-slot" data-slot="' + i + '">' + label + '</div>';
   }
+  html += '<div class="sl-sep"></div>';
+  html += '<div class="sl-item sl-danger" data-action="reset-all">Reset Everything<span class="sl-meta">wipe all saves</span></div>';
   loadMenu.innerHTML = html;
   loadMenu.querySelectorAll('.sl-item').forEach(function(el) {
     el.addEventListener('click', function(e) {
@@ -5304,9 +5308,30 @@ function buildLoadMenu() {
       if (action === 'new') createDefaultPatch();
       else if (action === 'import') importPatchFile();
       else if (action === 'load-slot') loadFromSlot('slot' + el.dataset.slot);
+      else if (action === 'reset-all') resetEverything();
       loadMenu.classList.remove('open');
     });
   });
+}
+
+function resetEverything() {
+  if (!confirm('Wipe ALL saved patches (autosave + slots 1–5) and reload? This cannot be undone.')) return;
+  // Stop audio first so nothing dangles
+  if (isPlaying) try { togglePlay(); } catch(e) {}
+  if (audioCtx) {
+    try { audioCtx.close(); } catch(e) {}
+  }
+  // Clear every grainfield localStorage key
+  try {
+    var keysToRemove = [];
+    for (var i = 0; i < localStorage.length; i++) {
+      var k = localStorage.key(i);
+      if (k && k.indexOf('grainfield-') === 0) keysToRemove.push(k);
+    }
+    keysToRemove.forEach(function(k) { localStorage.removeItem(k); });
+  } catch(e) { console.warn('localStorage clear failed:', e); }
+  // Hard reload so the page rebuilds from scratch with no autosave
+  location.reload();
 }
 
 document.getElementById('saveBtn').addEventListener('click', function(e) {
@@ -5386,6 +5411,32 @@ if (!loadFromSlot('autosave')) {
 }
 
 requestAnimationFrame(function() { requestAnimationFrame(redrawWires); });
+
+// Diagnostic — call `gfDebug()` in the browser console to dump every node and wire
+window.gfDebug = function() {
+  console.group('Grainfield state');
+  console.log('isPlaying:', isPlaying, '| audioCtx:', audioCtx ? audioCtx.state : 'null');
+  console.log('Nodes (' + nodes.length + '):');
+  nodes.forEach(function(n) {
+    var hasAudio = !!n.audio;
+    var sub = '';
+    if (n.audio) {
+      if (n.audio.type === 'modmatrix') {
+        sub = ' (target=' + n.params.target + ' param=' + n.params.targetParam + ' depth=' + n.params.depth + ' pollActive=' + !!n.audio.pollId + ')';
+      } else if (n.audio.type === 'smoothlfo') {
+        sub = ' (rate=' + n.params.rate + ' depth=' + n.params.depth + ' shape=' + n.params.shape + ')';
+      } else if (n.audio.type === 'lfo') {
+        sub = ' (freq=' + n.params.lfoFreq + ' depth=' + n.params.lfoDepth + ')';
+      } else if (n.audio.type === 'wowflutter') {
+        sub = ' (wow=' + n.params.wow + ' flutter=' + n.params.flutter + ' drift=' + n.params.drift + ')';
+      }
+    }
+    console.log('  #' + n.id + ' ' + n.type + (hasAudio ? '' : ' [NO AUDIO]') + sub);
+  });
+  console.log('Wires (' + wires.length + '):');
+  wires.forEach(function(w) { console.log('  ' + w.from + ' -> ' + w.to + (w.fromPort ? ' (port ' + w.fromPort + ')' : '')); });
+  console.groupEnd();
+};
 
 </script>
 </body>
