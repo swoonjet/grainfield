@@ -4817,26 +4817,35 @@ canvasEl.addEventListener('contextmenu', function(e) {
 });
 
 // ─── ZOOM (scroll wheel / trackpad pinch) ───
+// Trackpad pinch can fire ~120 wheel events per second. Each redrawWires()
+// call hits getBoundingClientRect() multiple times per wire, forcing a
+// layout flush. Coalesce all events within a frame into a single update.
+var pendingWheelDelta = 0;
+var pendingWheelClient = { x: 0, y: 0 };
+var wheelRAFId = null;
 canvasEl.addEventListener('wheel', function(e) {
   e.preventDefault();
-  // Pinch-to-zoom on trackpad sends ctrlKey with deltaY
-  // Regular scroll wheel also uses deltaY
   var zoomSpeed = e.ctrlKey ? 0.01 : 0.002;
-  var delta = -e.deltaY * zoomSpeed;
-  var newZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom + delta));
-  if (newZoom === zoom) return;
-  // Zoom toward the cursor position
-  var mouseX = e.clientX;
-  var mouseY = e.clientY - 50;
-  // Canvas point under cursor before zoom
-  var cx = (mouseX - panX) / zoom;
-  var cy = (mouseY - panY) / zoom;
-  zoom = newZoom;
-  // Adjust pan so the same canvas point stays under cursor
-  panX = mouseX - cx * zoom;
-  panY = mouseY - cy * zoom;
-  updateTransform();
-  redrawWires();
+  pendingWheelDelta += -e.deltaY * zoomSpeed;
+  pendingWheelClient.x = e.clientX;
+  pendingWheelClient.y = e.clientY;
+  if (wheelRAFId !== null) return;
+  wheelRAFId = requestAnimationFrame(function() {
+    wheelRAFId = null;
+    var delta = pendingWheelDelta;
+    pendingWheelDelta = 0;
+    var newZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom + delta));
+    if (newZoom === zoom) return;
+    var mouseX = pendingWheelClient.x;
+    var mouseY = pendingWheelClient.y - 50;
+    var cx = (mouseX - panX) / zoom;
+    var cy = (mouseY - panY) / zoom;
+    zoom = newZoom;
+    panX = mouseX - cx * zoom;
+    panY = mouseY - cy * zoom;
+    updateTransform();
+    redrawWires();
+  });
 }, { passive: false });
 
 document.addEventListener('mousemove', function(e) {
