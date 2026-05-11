@@ -678,7 +678,7 @@ var NODE_DEFS = {
   },
   strudel: {
     category: 'Source', title: 'Strudel', inputs: [], outputs: ['audio'],
-    params: { code: 'stack(\n  s("bd*4"),\n  s("~ cp ~ cp"),\n  s("hh*8").gain(0.35),\n  s("[~ oh]*4").gain(0.45)\n).cpm(118/4)' }
+    params: { code: 'samples(\'github:tidalcycles/dirt-samples\')\n\nstack(\n  s("bd*4"),\n  s("~ cp ~ cp"),\n  s("hh*8").gain(0.35),\n  s("[~ oh]*4").gain(0.45)\n).cpm(118/4)' }
   },
   mixer: {
     category: 'Utility', title: 'Mixer', inputs: ['audio'], outputs: ['audio'],
@@ -3097,7 +3097,10 @@ function loadStrudelLib(statusFn) {
     var d = m.default && typeof m.default === 'object' ? m.default : null;
     var pick = function(name) { return m[name] || (d && d[name]); };
     var initFn = pick('initStrudel');
-    var initOptions = { audioContext: audioCtx, prebake: undefined };
+    // Leave prebake unset so Strudel auto-loads its default drum sample bank.
+    // Setting prebake: undefined was overriding the library default and
+    // breaking any pattern that referenced sample names like s("bd").
+    var initOptions = { audioContext: audioCtx };
     var initResult = null;
     if (typeof initFn === 'function') {
       try { initResult = initFn(initOptions); }
@@ -5157,8 +5160,11 @@ function loadPatch(data) {
     panY = data.viewport.panY || 0;
     zoom = data.viewport.zoom || 1;
   }
-  // Migrate: replace old Strudel default (sawtooth note pattern) with current default
-  var OLD_STRUDEL_DEFAULTS = ['note("c3 eb3 g3 bb3").s("sawtooth").lpf(800)'];
+  // Migrate: replace any previous Strudel default code with the current default
+  var OLD_STRUDEL_DEFAULTS = [
+    'note("c3 eb3 g3 bb3").s("sawtooth").lpf(800)',
+    'stack(\n  s("bd*4"),\n  s("~ cp ~ cp"),\n  s("hh*8").gain(0.35),\n  s("[~ oh]*4").gain(0.45)\n).cpm(118/4)'
+  ];
   data.nodes.forEach(function(nd) {
     if (nd.type === 'strudel' && nd.params && OLD_STRUDEL_DEFAULTS.indexOf(nd.params.code) > -1) {
       nd.params.code = NODE_DEFS.strudel.params.code;
