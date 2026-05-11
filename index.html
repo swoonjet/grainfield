@@ -4755,6 +4755,25 @@ function updateTransform() {
   canvasEl.style.backgroundPosition = panX+'px '+panY+'px';
 }
 
+// Coalesce redraws to one per animation frame. mousemove can fire faster
+// than the browser can lay out wires (each redrawWires call hits
+// getBoundingClientRect for every port), which froze the UI on heavier
+// patches. Callers set the flags; a single RAF flushes them.
+var _redrawPending = false;
+var _wantTransform = false;
+var _wantWires = false;
+function scheduleVisualUpdate(transform, wires) {
+  if (transform) _wantTransform = true;
+  if (wires) _wantWires = true;
+  if (_redrawPending) return;
+  _redrawPending = true;
+  requestAnimationFrame(function() {
+    _redrawPending = false;
+    if (_wantTransform) { _wantTransform = false; updateTransform(); }
+    if (_wantWires) { _wantWires = false; redrawWires(); }
+  });
+}
+
 // Convert screen coordinates to canvas-inner coordinates (accounting for pan + zoom)
 function screenToCanvas(sx, sy) {
   return {
@@ -4817,42 +4836,27 @@ canvasEl.addEventListener('contextmenu', function(e) {
 });
 
 // ─── ZOOM (scroll wheel / trackpad pinch) ───
-// Trackpad pinch can fire ~120 wheel events per second. Each redrawWires()
-// call hits getBoundingClientRect() multiple times per wire, forcing a
-// layout flush. Coalesce all events within a frame into a single update.
-var pendingWheelDelta = 0;
-var pendingWheelClient = { x: 0, y: 0 };
-var wheelRAFId = null;
 canvasEl.addEventListener('wheel', function(e) {
   e.preventDefault();
   var zoomSpeed = e.ctrlKey ? 0.01 : 0.002;
-  pendingWheelDelta += -e.deltaY * zoomSpeed;
-  pendingWheelClient.x = e.clientX;
-  pendingWheelClient.y = e.clientY;
-  if (wheelRAFId !== null) return;
-  wheelRAFId = requestAnimationFrame(function() {
-    wheelRAFId = null;
-    var delta = pendingWheelDelta;
-    pendingWheelDelta = 0;
-    var newZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom + delta));
-    if (newZoom === zoom) return;
-    var mouseX = pendingWheelClient.x;
-    var mouseY = pendingWheelClient.y - 50;
-    var cx = (mouseX - panX) / zoom;
-    var cy = (mouseY - panY) / zoom;
-    zoom = newZoom;
-    panX = mouseX - cx * zoom;
-    panY = mouseY - cy * zoom;
-    updateTransform();
-    redrawWires();
-  });
+  var delta = -e.deltaY * zoomSpeed;
+  var newZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom + delta));
+  if (newZoom === zoom) return;
+  var mouseX = e.clientX;
+  var mouseY = e.clientY - 50;
+  var cx = (mouseX - panX) / zoom;
+  var cy = (mouseY - panY) / zoom;
+  zoom = newZoom;
+  panX = mouseX - cx * zoom;
+  panY = mouseY - cy * zoom;
+  scheduleVisualUpdate(true, true);
 }, { passive: false });
 
 document.addEventListener('mousemove', function(e) {
   if (isPanning) {
     panX = e.clientX - panStart.x;
     panY = e.clientY - panStart.y;
-    updateTransform();
+    scheduleVisualUpdate(true, false);
     return;
   }
   if (draggingNode) {
@@ -4861,7 +4865,7 @@ document.addEventListener('mousemove', function(e) {
     draggingNode.x = nx; draggingNode.y = ny;
     draggingNode.el.style.left = nx+'px';
     draggingNode.el.style.top = ny+'px';
-    redrawWires();
+    scheduleVisualUpdate(false, true);
     return;
   }
   if (draggingWire && tempWirePath) {
