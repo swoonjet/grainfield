@@ -3141,39 +3141,44 @@ function loadStrudelLib(statusFn) {
 }
 
 // Try to redirect Strudel's master output through a GainNode we control.
-// Several Strudel versions expose different APIs — try them all.
+// Different Strudel versions expose different APIs — try a wide list.
 function attemptStrudelBusSetup(api) {
   if (!audioCtx) return;
   if (strudelMasterBus) return;
   var bus = audioCtx.createGain();
   bus.gain.value = 1.0;
   var didSet = false;
-  // Direct API: setDefaultOutput / setOutput
-  try {
-    if (typeof api.setDefaultOutput === 'function') {
-      api.setDefaultOutput(bus); didSet = true;
-      console.log('[strudel] routed via setDefaultOutput()');
-    } else if (typeof api.setOutput === 'function') {
-      api.setOutput(bus); didSet = true;
-      console.log('[strudel] routed via setOutput()');
-    }
-  } catch(e) { console.warn('[strudel] setOutput attempt failed:', e); }
-  // Module-level fallback
-  if (!didSet && api.module) {
-    try {
-      var fns = ['setDefaultOutput','setOutput','setMaster','setDestination'];
-      for (var i = 0; i < fns.length; i++) {
-        if (typeof api.module[fns[i]] === 'function') {
-          api.module[fns[i]](bus); didSet = true;
-          console.log('[strudel] routed via module.' + fns[i] + '()');
-          break;
+  var FN_NAMES = [
+    'setDefaultDestination', 'setDefaultOutput',
+    'setOutput', 'setDestination', 'setMaster'
+  ];
+  function tryNamesOn(host, hostLabel) {
+    if (didSet || !host) return;
+    for (var i = 0; i < FN_NAMES.length; i++) {
+      var name = FN_NAMES[i];
+      if (typeof host[name] === 'function') {
+        try {
+          host[name](bus);
+          didSet = true;
+          console.log('[strudel] routed via ' + hostLabel + '.' + name + '()');
+          return;
+        } catch(e) {
+          console.warn('[strudel] ' + hostLabel + '.' + name + ' threw:', e);
         }
       }
-    } catch(e) { console.warn('[strudel] module-level redirect failed:', e); }
+    }
+  }
+  tryNamesOn(api, 'api');
+  tryNamesOn(api.module, 'module');
+  if (api.module && api.module.default) tryNamesOn(api.module.default, 'module.default');
+  if (api.module && api.module.superdough) tryNamesOn(api.module.superdough, 'module.superdough');
+  if (!didSet) {
+    // Dump the available top-level keys so we can pick the right API name.
+    var keys = api.module ? Object.keys(api.module).filter(function(k) { return k.toLowerCase().indexOf('out') > -1 || k.toLowerCase().indexOf('dest') > -1 || k.toLowerCase().indexOf('master') > -1; }) : [];
+    console.log('[strudel] no known redirect API found. output/dest/master-related module keys:', keys);
   }
   if (didSet) {
     strudelMasterBus = bus;
-    // Connect bus to all existing strudel nodes' output
     nodes.forEach(function(n) {
       if (n.type === 'strudel' && n.audio && n.audio.output) {
         try { bus.connect(n.audio.output); } catch(e) {}
@@ -3181,7 +3186,6 @@ function attemptStrudelBusSetup(api) {
       }
     });
   } else {
-    // Could not redirect — keep bus null; Strudel will play directly to speakers
     try { bus.disconnect(); } catch(e) {}
     console.log('[strudel] could not redirect output — playing to speakers directly');
   }
