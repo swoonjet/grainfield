@@ -22,8 +22,8 @@
     --blue: #90b8e8;
     --port-out: #a0d8a8;
     --port-in: #c4cef0;
-    --wire-color: rgba(160,216,168,0.55);
-    --wire-active: rgba(160,216,168,0.95);
+    --wire-color: rgba(160,216,168,0.78);
+    --wire-active: rgba(160,216,168,1.0);
     --mono: 'SF Mono', 'Fira Code', 'Courier New', monospace;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -135,7 +135,7 @@
   }
   .wire-layer path {
     fill: none; stroke: var(--wire-color); stroke-width: 2.8;
-    pointer-events: stroke; cursor: pointer; transition: stroke 0.3s;
+    pointer-events: stroke; cursor: pointer;
   }
   .wire-layer path:hover { stroke: var(--warn); stroke-width: 3.5; }
   .wire-layer path.active { stroke: var(--wire-active); stroke-width: 3; }
@@ -3216,6 +3216,7 @@ function evalStrudelNode(node) {
         strudelActiveNodeId = node.id;
         var statusMsg = node.audio.routedToBus ? 'playing → graph' : 'playing → speakers';
         setStrudelStatus(node, statusMsg, 'playing');
+        updateWireStates();
       }).catch(function(err) {
         setStrudelStatus(node, 'eval error: ' + (err && err.message || err), 'error');
         console.warn('[strudel] eval rejected:', err);
@@ -3243,6 +3244,7 @@ function stopStrudelNode(node) {
   if (node.audio) node.audio.playing = false;
   if (strudelActiveNodeId === node.id) strudelActiveNodeId = null;
   setStrudelStatus(node, 'stopped');
+  updateWireStates();
 }
 
 function startNoiseSource(node) {
@@ -3525,6 +3527,26 @@ function togglePlay() {
   updatePlayUI();
 }
 
+// True if anything is producing audio: global Activate, or a Strudel node
+// playing independently, or any keyboard voice currently held.
+function anyAudioPlaying() {
+  if (isPlaying) return true;
+  for (var i = 0; i < nodes.length; i++) {
+    var n = nodes[i];
+    if (n.type === 'strudel' && n.audio && n.audio.playing) return true;
+  }
+  return false;
+}
+
+function updateWireStates() {
+  var live = anyAudioPlaying();
+  wires.forEach(function(w) {
+    if (!w.pathEl) return;
+    w.pathEl.classList.toggle('active', live);
+    w.pathEl.classList.toggle('flowing', live);
+  });
+}
+
 function updatePlayUI() {
   var btn = document.getElementById('playBtn');
   btn.textContent = isPlaying ? 'Deactivate' : 'Activate';
@@ -3532,12 +3554,7 @@ function updatePlayUI() {
   nodes.forEach(function(n) {
     if (n.el) n.el.classList.toggle('active', isPlaying);
   });
-  wires.forEach(function(w) {
-    if (w.pathEl) {
-      w.pathEl.classList.toggle('active', isPlaying);
-      w.pathEl.classList.toggle('flowing', isPlaying);
-    }
-  });
+  updateWireStates();
 }
 
 // ─── NODE CRUD ───
@@ -4695,7 +4712,10 @@ function drawWire(wire) {
     wireLayer.appendChild(wire.pathEl);
   }
   wire.pathEl.setAttribute('d', d);
-  if (isPlaying) { wire.pathEl.classList.add('active'); wire.pathEl.classList.add('flowing'); }
+  if (anyAudioPlaying()) {
+    wire.pathEl.classList.add('active');
+    wire.pathEl.classList.add('flowing');
+  }
 }
 
 function curvePath(x1,y1,x2,y2) {
