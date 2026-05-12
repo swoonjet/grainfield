@@ -3618,7 +3618,7 @@ function renderNode(node) {
   }
   else if (node.type === 'grain') {
     html += slider(node, 'grainSize', 'Size', 5, 400, 1, 'ms');
-    html += slider(node, 'density', 'Density', 1, 60, 1, 'ps');
+    html += slider(node, 'density', 'Density', 0.5, 60, 0.1, 'psbpm');
     html += slider(node, 'scatter', 'Scatter', 0, 1, 0.01, 'f2');
     html += slider(node, 'shape', 'Shape', 0.01, 0.99, 0.01, 'f2');
   }
@@ -3676,12 +3676,12 @@ function renderNode(node) {
   }
   else if (node.type === 'smoothlfo') {
     html += waveButtons(node, ['smooth','walk','sh'], ['Smooth','Walk','S&H'], 'shape');
-    html += slider(node, 'rate', 'Rate', 0.05, 8, 0.05, 'f2');
+    html += slider(node, 'rate', 'Rate', 0.05, 8, 0.01, 'hzbpm');
     html += slider(node, 'depth', 'Depth', 0, 1, 0.01, 'f2');
   }
   else if (node.type === 'lfo') {
     html += waveButtons(node, ['sine','triangle','sawtooth','square'], ['Sin','Tri','Saw','Sqr'], 'lfoWave');
-    html += slider(node, 'lfoFreq', 'Freq', 0.05, 30, 0.05, 'f2');
+    html += slider(node, 'lfoFreq', 'Freq', 0.05, 30, 0.01, 'hzbpm');
     html += slider(node, 'lfoDepth', 'Depth', 0, 1, 0.01, 'f2');
   }
   else if (node.type === 'chorus') {
@@ -3742,7 +3742,7 @@ function renderNode(node) {
   else if (node.type === 'grainlab') {
     html += waveButtons(node, ['spectral','roundrobin','random','density'], ['Spectral','R-Robin','Random','Density'], 'algorithm');
     html += slider(node, 'grainSize', 'Size', 5, 400, 1, 'ms');
-    html += slider(node, 'density', 'Density', 1, 60, 1, 'ps');
+    html += slider(node, 'density', 'Density', 0.5, 60, 0.1, 'psbpm');
     html += slider(node, 'scatter', 'Scatter', 0, 1, 0.01, 'f2');
     html += slider(node, 'shape', 'Shape', 0.01, 0.99, 0.01, 'f2');
     html += slider(node, 'layerSpread', 'Spread', 0, 1, 0.01, 'f2');
@@ -3753,7 +3753,7 @@ function renderNode(node) {
     html += slider(node, 'detune', 'Detune', 0, 1, 0.01, 'f2');
     html += slider(node, 'spread', 'Spread', 0, 1, 0.01, 'f2');
     html += slider(node, 'grainSize', 'Size', 5, 400, 1, 'ms');
-    html += slider(node, 'density', 'Density', 1, 60, 1, 'ps');
+    html += slider(node, 'density', 'Density', 0.5, 60, 0.1, 'psbpm');
     html += slider(node, 'scatter', 'Scatter', 0, 1, 0.01, 'f2');
     html += slider(node, 'shape', 'Shape', 0.01, 0.99, 0.01, 'f2');
     html += slider(node, 'warmth', 'Warmth', 0, 1, 0.01, 'f2');
@@ -4617,6 +4617,10 @@ function fmtVal(v, f) {
   if (f === 'x') return Math.round(v) + 'x';
   if (f === 'f3') return v.toFixed(3);
   if (f === 'pan') return v < -0.01 ? 'L ' + Math.abs(v).toFixed(2) : v > 0.01 ? 'R ' + v.toFixed(2) : 'C';
+  // Rhythmic formats: append the perceived BPM (events × 60) so a Strudel
+  // pattern at 118 BPM can be matched by setting density/rate to 1.97.
+  if (f === 'psbpm') return Math.round(v) + ' /s · ' + Math.round(v * 60) + ' bpm';
+  if (f === 'hzbpm') return v.toFixed(2) + ' Hz · ' + Math.round(v * 60) + ' bpm';
   return v.toFixed(2);
 }
 
@@ -5065,8 +5069,12 @@ function updateParticles() {
     _lastParticleCount = particles.length;
   }
 
-  // Audio-reactive glow on output nodes when playing
-  if (isPlaying) {
+  // Audio-reactive glow on output nodes when playing. Skip entirely while
+  // the user is panning or dragging — getByteFrequencyData forces a sync
+  // read from the audio thread and contributes to UI stalls when combined
+  // with Strudel's own scheduling work.
+  var skipGlow = isPanning || draggingNode;
+  if (isPlaying && !skipGlow) {
     for (var ni = 0; ni < nodes.length; ni++) {
       var n = nodes[ni];
       if (n.type !== 'output' || !n.audio || !n.audio.analyser || !n.el) continue;
@@ -5079,7 +5087,7 @@ function updateParticles() {
       var glow = avg > 0.5 ? 1 : avg * 2;
       n.el.style.boxShadow = '0 0 ' + (10 + glow*30) + 'px rgba(139,171,144,' + (glow*0.3).toFixed(2) + ')';
     }
-  } else if (_lastGlowState) {
+  } else if (!isPlaying && _lastGlowState) {
     for (var nj = 0; nj < nodes.length; nj++) {
       if (nodes[nj].el) nodes[nj].el.style.boxShadow = '';
     }
