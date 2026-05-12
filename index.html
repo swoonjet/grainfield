@@ -5591,6 +5591,28 @@ if (!loadFromSlot('autosave')) {
 
 requestAnimationFrame(function() { requestAnimationFrame(redrawWires); });
 
+// Diagnostic — call `gfWireDebug()` to dump every wire's actual SVG state
+window.gfWireDebug = function() {
+  console.group('Wire SVG state');
+  console.log('wireLayer:', wireLayer, 'zoom:', zoom, 'pan:', panX, panY);
+  var paths = document.querySelectorAll('#wireLayer path');
+  console.log('Path count:', paths.length, 'Wires array:', wires.length);
+  wires.forEach(function(w, i) {
+    var p = w.pathEl;
+    if (!p) { console.log('  wire', i, w.from, '→', w.to, 'NO pathEl'); return; }
+    var cs = getComputedStyle(p);
+    console.log('  wire', i, w.from, '→', w.to,
+      '\n    d=' + p.getAttribute('d'),
+      '\n    classes=' + p.className.baseVal,
+      '\n    stroke=' + cs.stroke,
+      '\n    stroke-width=' + cs.strokeWidth,
+      '\n    visibility=' + cs.visibility,
+      '\n    opacity=' + cs.opacity,
+      '\n    bbox=' + JSON.stringify(p.getBBox()));
+  });
+  console.groupEnd();
+};
+
 // Diagnostic — call `gfDebug()` in the browser console to dump every node and wire
 window.gfDebug = function() {
   console.group('Grainfield state');
