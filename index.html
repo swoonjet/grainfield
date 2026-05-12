@@ -697,7 +697,7 @@ var NODE_DEFS = {
   },
   keyboard: {
     category: 'Source', title: 'Keyboard', inputs: [], outputs: ['audio'],
-    params: { waveform: 'sawtooth', octave: 4, attack: 0.02, release: 0.3, gain: 0.4, glide: 0 }
+    params: { waveform: 'sawtooth', octave: 4, attack: 0.003, release: 0.3, gain: 0.4, glide: 0 }
   },
   sequencer: {
     category: 'Source', title: 'Sequencer', inputs: [], outputs: ['audio'],
@@ -761,7 +761,14 @@ var NODE_DEFS = {
 // ─── AUDIO ENGINE ───
 function initAudio() {
   if (audioCtx) return;
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  // latencyHint: 'interactive' tells the browser to use the smallest
+  // practical audio buffer — critical for keyboard/sequencer responsiveness.
+  // Default ('balanced') can buffer 30-50ms ahead.
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+  } catch(e) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
 }
 
 function buildNodeAudio(node) {
@@ -2695,9 +2702,12 @@ function noteOnKeyboard(node, midi) {
   }
   var g = audioCtx.createGain();
   g.gain.value = 0;
-  var att = Math.max(0.001, node.params.attack || 0.02);
-  g.gain.setValueAtTime(0, audioCtx.currentTime);
-  g.gain.linearRampToValueAtTime(0.6, audioCtx.currentTime + att);
+  // Schedule the ramp as soon as the audio thread can start it. att below
+  // ~5ms is essentially instant but still avoids a click.
+  var att = Math.max(0.001, node.params.attack || 0.003);
+  var now = audioCtx.currentTime;
+  g.gain.setValueAtTime(0, now);
+  g.gain.linearRampToValueAtTime(0.6, now + att);
   osc.connect(g);
   g.connect(node.audio.output);
   osc.start();
