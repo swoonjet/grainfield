@@ -79,6 +79,14 @@
   .toolbar-btn:hover { border-color: var(--accent); color: var(--text); }
   .toolbar-btn.active { border-color: var(--active); color: var(--active); background: var(--active-dim); }
   .toolbar-btn.play { min-width: 90px; }
+  @keyframes recordPulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(232,80,80,0.55); }
+    50% { box-shadow: 0 0 0 6px rgba(232,80,80,0); }
+  }
+  .toolbar-btn.recording {
+    border-color: var(--warn); color: var(--warn);
+    animation: recordPulse 1.4s ease-out infinite;
+  }
   .toolbar-sep { width: 1px; height: 20px; background: var(--border); }
 
   /* ─── ADD NODE DROPDOWN ─── */
@@ -542,6 +550,7 @@
   </div>
   <button class="toolbar-btn" id="clearBtn" title="Wipe canvas and start over">Clear</button>
   <button class="toolbar-btn" id="themeBtn" title="Toggle light / dark mode">Light</button>
+  <button class="toolbar-btn" id="recordBtn" title="Record audio output">&#9679; Rec</button>
   <div class="toolbar-sep"></div>
   <button class="toolbar-btn play" id="playBtn">Activate</button>
 </div>
@@ -5109,6 +5118,90 @@ document.getElementById('clearBtn').addEventListener('click', function(e) {
   e.stopPropagation();
   if (!confirm('Clear the canvas and start fresh? Any unsaved patch will be lost.')) return;
   createDefaultPatch();
+});
+
+// Audio recording — taps MediaStreamDestination off every Master Out node
+// so the recording matches what reaches the speakers via the patch graph.
+var _recState = { recorder: null, dest: null, chunks: [], startedAt: 0, timerId: null, taps: [] };
+var recordBtn = document.getElementById('recordBtn');
+
+function pickRecorderMime() {
+  var mimes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'];
+  for (var i = 0; i < mimes.length; i++) {
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported(mimes[i])) return mimes[i];
+  }
+  return '';
+}
+
+function startRecording() {
+  if (_recState.recorder) return;
+  initAudio();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  // Find all Master Out nodes; tap each one's input into the recorder dest.
+  var outputs = nodes.filter(function(n) { return n.type === 'output' && n.audio && n.audio.input; });
+  if (outputs.length === 0) { alert('Add a Master Out node before recording.'); return; }
+  var dest = audioCtx.createMediaStreamDestination();
+  var taps = [];
+  outputs.forEach(function(n) {
+    try { n.audio.input.connect(dest); taps.push(n.audio.input); } catch(e) {}
+  });
+  var mime = pickRecorderMime();
+  try {
+    _recState.recorder = mime ? new MediaRecorder(dest.stream, { mimeType: mime }) : new MediaRecorder(dest.stream);
+  } catch(e) {
+    alert('Recording not supported in this browser: ' + e.message);
+    taps.forEach(function(t) { try { t.disconnect(dest); } catch(e) {} });
+    return;
+  }
+  _recState.dest = dest;
+  _recState.chunks = [];
+  _recState.taps = taps;
+  _recState.startedAt = Date.now();
+  _recState.recorder.addEventListener('dataavailable', function(ev) {
+    if (ev.data && ev.data.size > 0) _recState.chunks.push(ev.data);
+  });
+  _recState.recorder.addEventListener('stop', function() {
+    var type = _recState.recorder.mimeType || 'audio/webm';
+    var blob = new Blob(_recState.chunks, { type: type });
+    var ext = type.indexOf('mp4') > -1 ? 'm4a' : (type.indexOf('ogg') > -1 ? 'ogg' : 'webm');
+    var stamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'grainfield-' + stamp + '.' + ext;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function() { document.body.removeChild(a); URL.revokeObjectURL(a.href); }, 200);
+    // Disconnect taps
+    _recState.taps.forEach(function(t) { try { t.disconnect(_recState.dest); } catch(e) {} });
+    _recState.recorder = null;
+    _recState.dest = null;
+    _recState.chunks = [];
+    _recState.taps = [];
+    if (_recState.timerId) { clearInterval(_recState.timerId); _recState.timerId = null; }
+    recordBtn.textContent = '● Rec';
+    recordBtn.classList.remove('recording');
+  });
+  _recState.recorder.start(250);
+  recordBtn.classList.add('recording');
+  function tick() {
+    var s = Math.floor((Date.now() - _recState.startedAt) / 1000);
+    var mm = Math.floor(s / 60);
+    var ss = s % 60;
+    recordBtn.textContent = '■ Stop ' + mm + ':' + (ss < 10 ? '0' : '') + ss;
+  }
+  tick();
+  _recState.timerId = setInterval(tick, 250);
+}
+
+function stopRecording() {
+  if (!_recState.recorder) return;
+  try { _recState.recorder.stop(); } catch(e) {}
+}
+
+recordBtn.addEventListener('click', function(e) {
+  e.stopPropagation();
+  if (_recState.recorder) stopRecording();
+  else startRecording();
 });
 
 // Theme toggle (persisted in localStorage)
