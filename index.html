@@ -1650,6 +1650,12 @@ function destroyNodeAudio(node) {
   if (!node.audio) return;
   if (node.audio.type === 'grain') {
     stopGrainEngine(node);
+    // Silence in-flight grains immediately. Each spawned grain is a short
+    // oscillator/buffer-source scheduled to play for grainSize ms; they
+    // feed into output. Zeroing output's gain hard-mutes them while their
+    // envelopes finish; disconnect then severs the downstream path.
+    try { node.audio.output.gain.cancelScheduledValues(audioCtx.currentTime); } catch(e) {}
+    try { node.audio.output.gain.value = 0; } catch(e) {}
     try { node.audio.output.disconnect(); } catch(e) {}
     try { node.audio.capturer.disconnect(); } catch(e) {}
     try { node.audio.silentDest.disconnect(); } catch(e) {}
@@ -1734,13 +1740,21 @@ function destroyNodeAudio(node) {
     stopGrainLabEngine(node);
     try { node.audio.capturer.disconnect(); } catch(e) {}
     try { node.audio.silentDest.disconnect(); } catch(e) {}
-    if (node.audio.outputs) node.audio.outputs.forEach(function(o) { try { o.disconnect(); } catch(e) {} });
+    // Hard-mute all output ports so in-flight grains die instantly.
+    if (node.audio.outputs) node.audio.outputs.forEach(function(o) {
+      try { o.gain.cancelScheduledValues(audioCtx.currentTime); } catch(e) {}
+      try { o.gain.value = 0; } catch(e) {}
+      try { o.disconnect(); } catch(e) {}
+    });
     if (node.audio.input) try { node.audio.input.disconnect(); } catch(e) {}
   }
   if (node.audio.type === 'grainchoir') {
     stopChoirGrainEngine(node);
     try { node.audio.capturer.disconnect(); } catch(e) {}
     try { node.audio.silentDest.disconnect(); } catch(e) {}
+    // Hard-mute the grain-spawn target so in-flight grains die instantly.
+    try { node.audio.grainOutput.gain.cancelScheduledValues(audioCtx.currentTime); } catch(e) {}
+    try { node.audio.grainOutput.gain.value = 0; } catch(e) {}
     try { node.audio.warmthFilter.disconnect(); } catch(e) {}
     try { node.audio.grainOutput.disconnect(); } catch(e) {}
     if (node.audio.input) try { node.audio.input.disconnect(); } catch(e) {}
@@ -1753,6 +1767,11 @@ function destroyNodeAudio(node) {
   }
   if (node.audio.type === 'grainseq') {
     stopGrainSeq(node);
+    // Hard-mute output so any in-flight grain voices die immediately.
+    if (node.audio.output) {
+      try { node.audio.output.gain.cancelScheduledValues(audioCtx.currentTime); } catch(e) {}
+      try { node.audio.output.gain.value = 0; } catch(e) {}
+    }
     try { node.audio.capturer.disconnect(); } catch(e) {}
     try { node.audio.silentDest.disconnect(); } catch(e) {}
     if (node.audio.input) try { node.audio.input.disconnect(); } catch(e) {}
