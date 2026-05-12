@@ -5246,8 +5246,36 @@ document.getElementById('playBtn').addEventListener('click', togglePlay);
 document.getElementById('clearBtn').addEventListener('click', function(e) {
   e.stopPropagation();
   if (!confirm('Clear the canvas and start fresh? Any unsaved patch will be lost.')) return;
-  createDefaultPatch();
+  clearCanvas();
 });
+
+// Empty the canvas completely — no default nodes, no wires, just a blank
+// workspace. Same teardown as createDefaultPatch but without the
+// oscillator → grain → reverb → output seed chain.
+function clearCanvas() {
+  if (isPlaying) togglePlay();
+  if (strudelApi && typeof strudelApi.hush === 'function') {
+    try { strudelApi.hush(); } catch(e) {}
+  }
+  wires.slice().forEach(function(w) { if (w.pathEl) w.pathEl.remove(); });
+  wires = [];
+  nodes.slice().forEach(function(n) {
+    destroyNodeAudio(n);
+    if (n.el) n.el.remove();
+  });
+  nodes = [];
+  document.querySelectorAll('#canvasInner > .node').forEach(function(el) { el.remove(); });
+  document.querySelectorAll('#wireLayer > path').forEach(function(el) { el.remove(); });
+  selectedNode = null;
+  selectedWire = null;
+  nextNodeId = 1;
+  // Recenter view on the canvas origin so the empty area is in view.
+  var cx = 3000, cy = 3000;
+  panX = -(cx - canvasEl.clientWidth/2);
+  panY = -(cy - canvasEl.clientHeight/2 + 22);
+  updateTransform();
+  scheduleAutoSave();
+}
 
 // Audio recording — captures PCM samples directly off Master Out via a
 // ScriptProcessor, then encodes a standard 16-bit WAV file on stop.
