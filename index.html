@@ -131,7 +131,11 @@
   .wire-layer {
     position: absolute; top: 0; left: 0;
     width: 6000px; height: 6000px;
-    pointer-events: none; z-index: 5;
+    /* Sit above node bodies (z=10) so the wire stroke is fully visible
+       across the canvas, but below port handles (z=20) so ports stay
+       hoverable/clickable. pointer-events: none lets clicks pass through
+       the empty SVG area to nodes underneath; only wire paths catch input. */
+    pointer-events: none; z-index: 15;
   }
   .wire-layer path {
     fill: none; stroke: var(--wire-color); stroke-width: 2.8;
