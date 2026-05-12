@@ -5239,68 +5239,98 @@ document.getElementById('clearBtn').addEventListener('click', function(e) {
   createDefaultPatch();
 });
 
-// Audio recording — taps MediaStreamDestination off every Master Out node
-// so the recording matches what reaches the speakers via the patch graph.
-var _recState = { recorder: null, dest: null, chunks: [], startedAt: 0, timerId: null, taps: [] };
+// Audio recording — captures PCM samples directly off Master Out via a
+// ScriptProcessor, then encodes a standard 16-bit WAV file on stop.
+// WAV plays in everything (Audacity, Logic, Ableton, Finder Quick Look,
+// QuickTime, Premiere) without any codec/container surprises.
+var _recState = {
+  active: false, proc: null, sum: null, silent: null, taps: [],
+  chunksL: [], chunksR: [], frames: 0,
+  startedAt: 0, timerId: null
+};
 var recordBtn = document.getElementById('recordBtn');
 
-function pickRecorderMime() {
-  var mimes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'];
-  for (var i = 0; i < mimes.length; i++) {
-    if (window.MediaRecorder && MediaRecorder.isTypeSupported(mimes[i])) return mimes[i];
+function encodeWavBlob(channels, sampleRate) {
+  // 16-bit PCM, little-endian, interleaved.
+  var numCh = channels.length;
+  var len = channels[0].length;
+  var bps = 16;
+  var blockAlign = numCh * (bps / 8);
+  var byteRate = sampleRate * blockAlign;
+  var dataSize = len * blockAlign;
+  var buf = new ArrayBuffer(44 + dataSize);
+  var v = new DataView(buf);
+  writeWavString(v, 0, 'RIFF');
+  v.setUint32(4, 36 + dataSize, true);
+  writeWavString(v, 8, 'WAVE');
+  writeWavString(v, 12, 'fmt ');
+  v.setUint32(16, 16, true);       // fmt chunk size
+  v.setUint16(20, 1, true);        // PCM format
+  v.setUint16(22, numCh, true);
+  v.setUint32(24, sampleRate, true);
+  v.setUint32(28, byteRate, true);
+  v.setUint16(32, blockAlign, true);
+  v.setUint16(34, bps, true);
+  writeWavString(v, 36, 'data');
+  v.setUint32(40, dataSize, true);
+  var off = 44;
+  for (var i = 0; i < len; i++) {
+    for (var ch = 0; ch < numCh; ch++) {
+      var s = Math.max(-1, Math.min(1, channels[ch][i]));
+      v.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+      off += 2;
+    }
   }
-  return '';
+  return new Blob([buf], { type: 'audio/wav' });
 }
 
 function startRecording() {
-  if (_recState.recorder) return;
+  if (_recState.active) return;
   initAudio();
   if (audioCtx.state === 'suspended') audioCtx.resume();
-  // Find all Master Out nodes; tap each one's input into the recorder dest.
   var outputs = nodes.filter(function(n) { return n.type === 'output' && n.audio && n.audio.input; });
   if (outputs.length === 0) { alert('Add a Master Out node before recording.'); return; }
-  var dest = audioCtx.createMediaStreamDestination();
+  // Sum all Master Out inputs into one tap, then capture through a
+  // ScriptProcessor. The processor's output is routed to a silent
+  // destination so the audio still reaches the speakers untouched.
+  var sum = audioCtx.createGain();
+  sum.gain.value = 1.0;
   var taps = [];
   outputs.forEach(function(n) {
-    try { n.audio.input.connect(dest); taps.push(n.audio.input); } catch(e) {}
+    try { n.audio.input.connect(sum); taps.push({ from: n.audio.input, to: sum }); } catch(e) {}
   });
-  var mime = pickRecorderMime();
-  try {
-    _recState.recorder = mime ? new MediaRecorder(dest.stream, { mimeType: mime }) : new MediaRecorder(dest.stream);
-  } catch(e) {
-    alert('Recording not supported in this browser: ' + e.message);
-    taps.forEach(function(t) { try { t.disconnect(dest); } catch(e) {} });
-    return;
-  }
-  _recState.dest = dest;
-  _recState.chunks = [];
+  var bufferSize = 4096;
+  var proc = audioCtx.createScriptProcessor(bufferSize, 2, 2);
+  var chunksL = [];
+  var chunksR = [];
+  var frames = 0;
+  proc.onaudioprocess = function(ev) {
+    var inL = ev.inputBuffer.getChannelData(0);
+    var inR = ev.inputBuffer.numberOfChannels > 1
+      ? ev.inputBuffer.getChannelData(1) : inL;
+    chunksL.push(new Float32Array(inL));
+    chunksR.push(new Float32Array(inR));
+    frames += inL.length;
+    // Pass-through to keep the audio thread happy (output goes to silent dest).
+    ev.outputBuffer.getChannelData(0).set(inL);
+    if (ev.outputBuffer.numberOfChannels > 1) ev.outputBuffer.getChannelData(1).set(inR);
+  };
+  sum.connect(proc);
+  var silent = audioCtx.createGain();
+  silent.gain.value = 0;
+  proc.connect(silent);
+  silent.connect(audioCtx.destination);
+  _recState.active = true;
+  _recState.proc = proc;
+  _recState.sum = sum;
+  _recState.silent = silent;
   _recState.taps = taps;
+  _recState.chunksL = chunksL;
+  _recState.chunksR = chunksR;
+  _recState.frames = 0; // updated below by closure; counted in finalize
   _recState.startedAt = Date.now();
-  _recState.recorder.addEventListener('dataavailable', function(ev) {
-    if (ev.data && ev.data.size > 0) _recState.chunks.push(ev.data);
-  });
-  _recState.recorder.addEventListener('stop', function() {
-    var type = _recState.recorder.mimeType || 'audio/webm';
-    var blob = new Blob(_recState.chunks, { type: type });
-    var ext = type.indexOf('mp4') > -1 ? 'm4a' : (type.indexOf('ogg') > -1 ? 'ogg' : 'webm');
-    var stamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
-    var a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'grainfield-' + stamp + '.' + ext;
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(function() { document.body.removeChild(a); URL.revokeObjectURL(a.href); }, 200);
-    // Disconnect taps
-    _recState.taps.forEach(function(t) { try { t.disconnect(_recState.dest); } catch(e) {} });
-    _recState.recorder = null;
-    _recState.dest = null;
-    _recState.chunks = [];
-    _recState.taps = [];
-    if (_recState.timerId) { clearInterval(_recState.timerId); _recState.timerId = null; }
-    recordBtn.textContent = '● Rec';
-    recordBtn.classList.remove('recording');
-  });
-  _recState.recorder.start(250);
+  // We update frames from the closure variable on stop, so keep a ref.
+  _recState._getFrames = function() { return frames; };
   recordBtn.classList.add('recording');
   function tick() {
     var s = Math.floor((Date.now() - _recState.startedAt) / 1000);
@@ -5313,13 +5343,43 @@ function startRecording() {
 }
 
 function stopRecording() {
-  if (!_recState.recorder) return;
-  try { _recState.recorder.stop(); } catch(e) {}
+  if (!_recState.active) return;
+  var st = _recState;
+  // Disconnect the capture chain.
+  try { st.proc.disconnect(); } catch(e) {}
+  try { st.silent.disconnect(); } catch(e) {}
+  st.taps.forEach(function(t) { try { t.from.disconnect(t.to); } catch(e) {} });
+  try { st.sum.disconnect(); } catch(e) {}
+  if (st.timerId) { clearInterval(st.timerId); st.timerId = null; }
+  recordBtn.classList.remove('recording');
+  recordBtn.textContent = '● Rec';
+  // Build a contiguous Float32Array for each channel.
+  var totalFrames = st._getFrames();
+  if (totalFrames === 0) {
+    alert('Recording was empty — was the patch making any sound?');
+    _recState = { active: false };
+    return;
+  }
+  var left = new Float32Array(totalFrames);
+  var right = new Float32Array(totalFrames);
+  var off = 0;
+  st.chunksL.forEach(function(c) { left.set(c, off); off += c.length; });
+  off = 0;
+  st.chunksR.forEach(function(c) { right.set(c, off); off += c.length; });
+  var blob = encodeWavBlob([left, right], audioCtx.sampleRate);
+  var stamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'grainfield-' + stamp + '.wav';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function() { document.body.removeChild(a); URL.revokeObjectURL(a.href); }, 200);
+  _recState = { active: false };
 }
 
 recordBtn.addEventListener('click', function(e) {
   e.stopPropagation();
-  if (_recState.recorder) stopRecording();
+  if (_recState.active) stopRecording();
   else startRecording();
 });
 
