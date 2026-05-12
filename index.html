@@ -5303,6 +5303,10 @@ function serializePatch(name) {
 function loadPatch(data) {
   // Stop playback
   if (isPlaying) togglePlay();
+  // Stop Strudel — independent scheduler that can otherwise keep playing.
+  if (strudelApi && typeof strudelApi.hush === 'function') {
+    try { strudelApi.hush(); } catch(e) {}
+  }
   // Remove all wires
   wires.slice().forEach(function(w) { if (w.pathEl) w.pathEl.remove(); });
   wires = [];
@@ -5312,6 +5316,13 @@ function loadPatch(data) {
     if (n.el) n.el.remove();
   });
   nodes = [];
+  // Belt-and-suspenders: nuke any orphan DOM left behind.
+  document.querySelectorAll('#canvasInner > .node').forEach(function(el) {
+    el.remove();
+  });
+  document.querySelectorAll('#wireLayer > path').forEach(function(el) {
+    el.remove();
+  });
   selectedNode = null;
   selectedWire = null;
   // Restore state
@@ -5579,6 +5590,11 @@ canvasEl.addEventListener('drop', function(e) {
 function createDefaultPatch() {
   // Clear everything first
   if (isPlaying) togglePlay();
+  // Stop Strudel if it's playing — its scheduler is independent of the
+  // node graph and could keep producing audio after a Clear otherwise.
+  if (strudelApi && typeof strudelApi.hush === 'function') {
+    try { strudelApi.hush(); } catch(e) {}
+  }
   wires.slice().forEach(function(w) { if (w.pathEl) w.pathEl.remove(); });
   wires = [];
   nodes.slice().forEach(function(n) {
@@ -5586,6 +5602,17 @@ function createDefaultPatch() {
     if (n.el) n.el.remove();
   });
   nodes = [];
+  // Belt-and-suspenders: nuke any orphan DOM that escaped tracking.
+  // Nodes mid-removal (300ms animation) or from a partial load can leave
+  // DOM elements behind that aren't in the nodes array; those would
+  // otherwise stay on-canvas after Clear and only be visible when zoomed
+  // out. Same for wire paths.
+  document.querySelectorAll('#canvasInner > .node').forEach(function(el) {
+    el.remove();
+  });
+  document.querySelectorAll('#wireLayer > path').forEach(function(el) {
+    el.remove();
+  });
   selectedNode = null;
   selectedWire = null;
   nextNodeId = 1;
