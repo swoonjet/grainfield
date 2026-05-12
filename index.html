@@ -4698,11 +4698,17 @@ function getPortPos(nodeId, portType, portIndex) {
   }
   if (!portEl) portEl = node.el.querySelector('.port.' + portType);
   if (!portEl) return { x: node.x + 90, y: node.y + 30 };
+  // getBoundingClientRect returns VIEWPORT pixels (post-zoom). node.x is in
+  // canvas-inner coordinates (untransformed). Divide the port-relative
+  // offset by the current zoom to convert it back to canvas coordinates
+  // before adding — otherwise wire endpoints drift away from ports
+  // whenever zoom is not 1.0.
   var nRect = node.el.getBoundingClientRect();
   var pRect = portEl.getBoundingClientRect();
+  var z = zoom || 1;
   return {
-    x: node.x + (pRect.left - nRect.left + pRect.width/2),
-    y: node.y + (pRect.top - nRect.top + pRect.height/2)
+    x: node.x + ((pRect.left - nRect.left) + pRect.width/2) / z,
+    y: node.y + ((pRect.top - nRect.top) + pRect.height/2) / z
   };
 }
 
