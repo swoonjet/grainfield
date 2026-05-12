@@ -497,6 +497,7 @@
     <div class="add-menu" id="addMenu">
       <div class="add-menu-cat">Sources</div>
       <div class="add-menu-item" data-type="oscillator"><span class="item-name">Oscillator</span><span class="item-desc">tone</span></div>
+      <div class="add-menu-item" data-type="wavetable"><span class="item-name">Wavetable</span><span class="item-desc">morph</span></div>
       <div class="add-menu-item" data-type="noise"><span class="item-name">Noise</span><span class="item-desc">texture</span></div>
       <div class="add-menu-item" data-type="lfo"><span class="item-name">LFO</span><span class="item-desc">modulate</span></div>
       <div class="add-menu-item" data-type="smoothlfo"><span class="item-name">Smooth LFO</span><span class="item-desc">organic mod</span></div>
@@ -612,6 +613,10 @@ var NODE_DEFS = {
   oscillator: {
     category: 'Source', title: 'Oscillator', inputs: [], outputs: ['audio'],
     params: { waveform: 'sine', pitch: 220 }
+  },
+  wavetable: {
+    category: 'Source', title: 'Wavetable', inputs: [], outputs: ['audio'],
+    params: { pitch: 220, position: 0, gain: 0.35 }
   },
   noise: {
     category: 'Source', title: 'Noise', inputs: [], outputs: ['audio'],
@@ -775,6 +780,14 @@ function buildNodeAudio(node) {
     oscGain.gain.value = 0.3;
     osc.connect(oscGain);
     node.audio = { type: 'oscillator', osc: osc, output: oscGain, started: false };
+  }
+  else if (t === 'wavetable') {
+    // OscillatorNode driven by a PeriodicWave that's rebuilt whenever the
+    // Position slider moves — morphs across 4 harmonic profiles
+    // (sine → triangle → saw → square).
+    var wtGain = audioCtx.createGain();
+    wtGain.gain.value = node.params.gain == null ? 0.35 : node.params.gain;
+    node.audio = { type: 'wavetable', osc: null, output: wtGain, started: false };
   }
   else if (t === 'noise') {
     // Noise generator using AudioBufferSourceNode
@@ -1673,6 +1686,9 @@ function destroyNodeAudio(node) {
   if (node.audio.type === 'oscillator') {
     try { node.audio.osc.stop(); } catch(e) {}
     try { node.audio.osc.disconnect(); } catch(e) {}
+  }
+  if (node.audio.type === 'wavetable') {
+    stopWaveTableSource(node);
   }
   if (node.audio.type === 'noise' && node.audio.sourceNode) {
     try { node.audio.sourceNode.stop(); } catch(e) {}
@@ -2960,6 +2976,7 @@ function fireSequencerNote(node, when, stepDur, stepIdx) {
 function modParamRange(nodeType, param) {
   var R = {
     oscillator: { pitch: [40, 880] },
+    wavetable: { pitch: [20, 2000], position: [0, 1], gain: [0, 1] },
     noise: { level: [0, 1] },
     filter: { frequency: [20, 8000], resonance: [0.1, 20] },
     delay: { time: [0.01, 2], feedback: [0, 0.95] },
@@ -3004,6 +3021,13 @@ function applyParamRealtime(node, param, val) {
   var smooth = 0.02;
   function setNow(p, v) { try { p.setTargetAtTime(v, ct, smooth); } catch(e) { try { p.value = v; } catch(_) {} } }
   if (t === 'oscillator' && param === 'pitch' && a.osc) setNow(a.osc.frequency, val);
+  else if (t === 'wavetable') {
+    if (param === 'pitch' && a.osc) setNow(a.osc.frequency, val);
+    else if (param === 'gain' && a.output) setNow(a.output.gain, val);
+    else if (param === 'position' && a.osc) {
+      try { a.osc.setPeriodicWave(buildWaveTablePeriodicWave(val)); } catch(e) {}
+    }
+  }
   else if (t === 'noise' && param === 'level' && a.output) setNow(a.output.gain, val);
   else if (t === 'filter' && a.filter) {
     if (param === 'frequency') setNow(a.filter.frequency, val);
@@ -3349,6 +3373,7 @@ function connectAudio() {
     if (n.audio.type === 'grainchoir') stopChoirGrainEngine(n);
     if (n.audio.type === 'noise') stopNoiseSource(n);
     if (n.audio.type === 'oscillator') stopOscSource(n);
+    if (n.audio.type === 'wavetable') stopWaveTableSource(n);
     if (n.audio.type === 'sampler') stopSamplerSource(n);
     if (n.audio.type === 'reverse') stopReverseEngine(n);
     if (n.audio.type === 'sequencer') stopSequencer(n);
@@ -3362,6 +3387,7 @@ function connectAudio() {
 
   // Track which sources need starting and which grains need buffer mode
   var oscNeedStart = {};
+  var wtNeedStart = {};
   var noiseNeedStart = {};
   var samplerNeedStart = {};
   var grainNeedBuffer = {};
@@ -3458,6 +3484,16 @@ function connectAudio() {
       samplerNeedStart[fn.id] = true;
       try { fromOutput.connect(tn.audio.input); } catch(e) {}
     }
+    // Wavetable → anything: needs start; also wire into grain-like inputs
+    // so it works as a capture source for grain engines (buffer mode).
+    else if (fn.type === 'wavetable' && tn.audio.input) {
+      wtNeedStart[fn.id] = true;
+      try { fromOutput.connect(tn.audio.input); } catch(e) {}
+      if (tn.type === 'grain') grainNeedBuffer[tn.id] = true;
+      if (tn.type === 'grainlab') grainlabNeedBuffer[tn.id] = true;
+      if (tn.type === 'grainchoir') grainchoirNeedBuffer[tn.id] = true;
+      if (tn.type === 'reverse') reverseNeedStart[tn.id] = true;
+    }
     // Generic: anything with output → anything with input (non-grain/grainlab/reverse targets)
     else if (!isSource(fn.type) && !isGrainLike(tn.type) && tn.type !== 'reverse' && tn.audio.input) {
       try { fromOutput.connect(tn.audio.input); } catch(e) {}
@@ -3468,6 +3504,7 @@ function connectAudio() {
   if (isPlaying) {
     nodes.forEach(function(n) {
       if (n.type === 'oscillator' && oscNeedStart[n.id]) startOscSource(n);
+      if (n.type === 'wavetable' && wtNeedStart[n.id]) startWaveTableSource(n);
       if (n.type === 'noise' && noiseNeedStart[n.id]) startNoiseSource(n);
       if (n.type === 'sampler' && samplerNeedStart[n.id]) startSamplerSource(n);
       if (n.type === 'grain' && grainNeedBuffer[n.id]) startBufferGrainEngine(n);
@@ -3481,6 +3518,69 @@ function connectAudio() {
       if (n.type === 'modmatrix') startModMatrixPoll(n);
     });
   }
+}
+
+// Wavetable harmonic profiles. Each profile lists the imaginary coefficients
+// for harmonics 1..N (real coefficients are all zero). Position morphs
+// between adjacent profiles via linear interpolation.
+var WT_HARM_COUNT = 32;
+var WT_PROFILES = (function() {
+  function sine() { var a = new Float32Array(WT_HARM_COUNT + 1); a[1] = 1; return a; }
+  function triangle() {
+    var a = new Float32Array(WT_HARM_COUNT + 1);
+    for (var n = 1; n <= WT_HARM_COUNT; n += 2) {
+      var sign = ((n - 1) / 2) % 2 === 0 ? 1 : -1;
+      a[n] = (8 / (Math.PI * Math.PI)) * sign / (n * n);
+    }
+    return a;
+  }
+  function saw() {
+    var a = new Float32Array(WT_HARM_COUNT + 1);
+    for (var n = 1; n <= WT_HARM_COUNT; n++) {
+      a[n] = (2 / Math.PI) * ((n % 2 === 0) ? -1 : 1) / n;
+    }
+    return a;
+  }
+  function square() {
+    var a = new Float32Array(WT_HARM_COUNT + 1);
+    for (var n = 1; n <= WT_HARM_COUNT; n += 2) a[n] = (4 / Math.PI) / n;
+    return a;
+  }
+  return [sine(), triangle(), saw(), square()];
+})();
+
+function buildWaveTablePeriodicWave(position) {
+  // position is 0..1; blend across (WT_PROFILES.length - 1) segments
+  var p = Math.max(0, Math.min(1, position)) * (WT_PROFILES.length - 1);
+  var i0 = Math.floor(p);
+  var i1 = Math.min(WT_PROFILES.length - 1, i0 + 1);
+  var t = p - i0;
+  var imag = new Float32Array(WT_HARM_COUNT + 1);
+  var real = new Float32Array(WT_HARM_COUNT + 1);
+  var a = WT_PROFILES[i0], b = WT_PROFILES[i1];
+  for (var n = 0; n <= WT_HARM_COUNT; n++) imag[n] = a[n] * (1 - t) + b[n] * t;
+  return audioCtx.createPeriodicWave(real, imag, { disableNormalization: false });
+}
+
+function startWaveTableSource(node) {
+  if (!node.audio || node.audio.type !== 'wavetable') return;
+  if (node.audio.started) return;
+  var osc = audioCtx.createOscillator();
+  osc.frequency.value = node.params.pitch || 220;
+  osc.setPeriodicWave(buildWaveTablePeriodicWave(node.params.position || 0));
+  osc.connect(node.audio.output);
+  osc.start();
+  node.audio.osc = osc;
+  node.audio.started = true;
+}
+
+function stopWaveTableSource(node) {
+  if (!node.audio || node.audio.type !== 'wavetable') return;
+  if (!node.audio.started) return;
+  try { node.audio.osc.stop(); } catch(e) {}
+  try { node.audio.osc.disconnect(); } catch(e) {}
+  node.audio.osc = null;
+  node.audio.started = false;
 }
 
 function startOscSource(node) {
@@ -3573,6 +3673,7 @@ function togglePlay() {
       if (n.audio && n.audio.type === 'grainchoir') stopChoirGrainEngine(n);
       if (n.audio && n.audio.type === 'noise') stopNoiseSource(n);
       if (n.audio && n.audio.type === 'oscillator') stopOscSource(n);
+      if (n.audio && n.audio.type === 'wavetable') stopWaveTableSource(n);
       if (n.audio && n.audio.type === 'sampler') stopSamplerSource(n);
       if (n.audio && n.audio.type === 'reverse') stopReverseEngine(n);
       if (n.audio && n.audio.type === 'sequencer') stopSequencer(n);
@@ -3690,6 +3791,11 @@ function renderNode(node) {
   if (node.type === 'oscillator') {
     html += waveButtons(node, ['sine','sawtooth','square','triangle'], ['Sin','Saw','Sqr','Tri']);
     html += slider(node, 'pitch', 'Pitch', 40, 880, 1, 'hz');
+  }
+  else if (node.type === 'wavetable') {
+    html += slider(node, 'pitch', 'Pitch', 20, 2000, 0.5, 'hz');
+    html += slider(node, 'position', 'Position', 0, 1, 0.001, 'f3');
+    html += slider(node, 'gain', 'Gain', 0, 1, 0.01, 'f2');
   }
   else if (node.type === 'noise') {
     html += waveButtons(node, ['white','pink','brown'], ['White','Pink','Brown'], 'noiseType');
@@ -4035,6 +4141,18 @@ function renderNode(node) {
         // Oscillator live pitch
         if (param === 'pitch' && node.audio && node.audio.type === 'oscillator' && node.audio.osc) {
           node.audio.osc.frequency.setTargetAtTime(val, audioCtx.currentTime, 0.05);
+        }
+        // Wavetable live updates
+        if (node.audio.type === 'wavetable') {
+          if (param === 'pitch' && node.audio.osc) {
+            node.audio.osc.frequency.setTargetAtTime(val, audioCtx.currentTime, 0.05);
+          }
+          if (param === 'position' && node.audio.osc) {
+            try { node.audio.osc.setPeriodicWave(buildWaveTablePeriodicWave(val)); } catch(e) {}
+          }
+          if (param === 'gain' && node.audio.output) {
+            node.audio.output.gain.setTargetAtTime(val, audioCtx.currentTime, 0.03);
+          }
         }
         if (param === 'space' && node.audio.dry) { node.audio.dry.gain.setTargetAtTime(1-val, audioCtx.currentTime, 0.05); node.audio.wet.gain.setTargetAtTime(val, audioCtx.currentTime, 0.05); }
         if (param === 'mix' && node.audio.dry) { node.audio.dry.gain.setTargetAtTime(1-val, audioCtx.currentTime, 0.05); node.audio.wet.gain.setTargetAtTime(val, audioCtx.currentTime, 0.05); }
@@ -4902,6 +5020,7 @@ canvasEl.addEventListener('contextmenu', function(e) {
     var cp = screenToCanvas(e.clientX, e.clientY);
     showCtxMenu(e.clientX, e.clientY, [
       { label: 'Oscillator', action: function() { createNode('oscillator', cp.x, cp.y); }},
+      { label: 'Wavetable', action: function() { createNode('wavetable', cp.x, cp.y); }},
       { label: 'Noise', action: function() { createNode('noise', cp.x, cp.y); }},
       { label: 'LFO', action: function() { createNode('lfo', cp.x, cp.y); }},
       { label: 'Smooth LFO', action: function() { createNode('smoothlfo', cp.x, cp.y); }},
