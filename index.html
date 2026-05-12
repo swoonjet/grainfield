@@ -4794,6 +4794,12 @@ function addWire(fromId, toId, fromPort) {
   var wire = { from: fromId, to: toId, fromPort: fromPort, pathEl: null };
   wires.push(wire);
   drawWire(wire);
+  // Redraw on the next two frames to recompute coordinates once layout
+  // has settled — drawWire's first pass can miss the correct port position
+  // when the path is created from inside a mouseup before the browser has
+  // re-laid out the canvas after the previous interaction.
+  requestAnimationFrame(function() { drawWire(wire); });
+  requestAnimationFrame(function() { requestAnimationFrame(function() { drawWire(wire); }); });
   updatePortStyles();
   if (isPlaying) connectAudio();
   // Particle burst on new connection
