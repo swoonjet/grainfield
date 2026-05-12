@@ -5041,41 +5041,54 @@ function spawnRemoveParticles(x, y) {
   }
 }
 
+// Reusable analyser buffer — avoids allocating a Uint8Array every frame,
+// which was producing serious GC pressure once Strudel started scheduling
+// patterns and made the freezes look like the UI was hung.
+var _analyserBuf = null;
+var _lastParticleCount = 0;
 function updateParticles() {
-  particleCtx.clearRect(0, 0, 6000, 6000);
-  for (var i = particles.length - 1; i >= 0; i--) {
-    var p = particles[i];
-    p.x += p.vx; p.y += p.vy;
-    p.life -= 0.03;
-    p.vx *= 0.96; p.vy *= 0.96;
-    if (p.life <= 0) { particles.splice(i, 1); continue; }
-    particleCtx.beginPath();
-    particleCtx.arc(p.x, p.y, 2 * p.life, 0, Math.PI * 2);
-    particleCtx.fillStyle = p.color + p.life + ')';
-    particleCtx.fill();
+  // Only clear and redraw when there's something to draw. The 6000×6000
+  // particle canvas is 36 megapixels — wiping it every frame is wasted work.
+  if (particles.length > 0 || _lastParticleCount > 0) {
+    particleCtx.clearRect(0, 0, 6000, 6000);
+    for (var i = particles.length - 1; i >= 0; i--) {
+      var p = particles[i];
+      p.x += p.vx; p.y += p.vy;
+      p.life -= 0.03;
+      p.vx *= 0.96; p.vy *= 0.96;
+      if (p.life <= 0) { particles.splice(i, 1); continue; }
+      particleCtx.beginPath();
+      particleCtx.arc(p.x, p.y, 2 * p.life, 0, Math.PI * 2);
+      particleCtx.fillStyle = p.color + p.life + ')';
+      particleCtx.fill();
+    }
+    _lastParticleCount = particles.length;
   }
 
   // Audio-reactive glow on output nodes when playing
   if (isPlaying) {
-    nodes.forEach(function(n) {
-      if (n.type === 'output' && n.audio && n.audio.analyser && n.el) {
-        var arr = new Uint8Array(n.audio.analyser.frequencyBinCount);
-        n.audio.analyser.getByteFrequencyData(arr);
-        var avg = 0;
-        for (var j = 0; j < arr.length; j++) avg += arr[j];
-        avg = avg / arr.length / 255;
-        var glow = Math.min(avg * 2, 1);
-        n.el.style.boxShadow = '0 0 ' + (10 + glow*30) + 'px rgba(139,171,144,' + (glow*0.3).toFixed(2) + ')';
-      }
-    });
-  } else {
-    nodes.forEach(function(n) {
-      if (n.el) n.el.style.boxShadow = '';
-    });
+    for (var ni = 0; ni < nodes.length; ni++) {
+      var n = nodes[ni];
+      if (n.type !== 'output' || !n.audio || !n.audio.analyser || !n.el) continue;
+      var fbc = n.audio.analyser.frequencyBinCount;
+      if (!_analyserBuf || _analyserBuf.length !== fbc) _analyserBuf = new Uint8Array(fbc);
+      n.audio.analyser.getByteFrequencyData(_analyserBuf);
+      var sum = 0;
+      for (var j = 0; j < fbc; j++) sum += _analyserBuf[j];
+      var avg = sum / fbc / 255;
+      var glow = avg > 0.5 ? 1 : avg * 2;
+      n.el.style.boxShadow = '0 0 ' + (10 + glow*30) + 'px rgba(139,171,144,' + (glow*0.3).toFixed(2) + ')';
+    }
+  } else if (_lastGlowState) {
+    for (var nj = 0; nj < nodes.length; nj++) {
+      if (nodes[nj].el) nodes[nj].el.style.boxShadow = '';
+    }
   }
+  _lastGlowState = isPlaying;
 
   requestAnimationFrame(updateParticles);
 }
+var _lastGlowState = false;
 requestAnimationFrame(updateParticles);
 
 // ═══════════════════════════════════════
