@@ -26,6 +26,28 @@
     --wire-active: rgba(160,216,168,1.0);
     --mono: 'SF Mono', 'Fira Code', 'Courier New', monospace;
   }
+  /* Light mode — high-contrast counterpart. Darker text on pale surfaces,
+     saturated accent colors so ports/wires/active states pop on white. */
+  body.light {
+    --bg: #f4f4ef;
+    --surface: #ffffff;
+    --raised: #f0f0eb;
+    --border: #1a1a20;
+    --text: #0a0a10;
+    --dim: #2a2a30;
+    --ghost: #5a5a60;
+    --accent: #2a3060;
+    --active: #1a7a3a;
+    --active-dim: rgba(26,122,58,0.16);
+    --active-glow: rgba(26,122,58,0.5);
+    --warn: #a83020;
+    --pink: #c43060;
+    --blue: #2050b0;
+    --port-out: #1a7a3a;
+    --port-in: #2050b0;
+    --wire-color: rgba(26,122,58,0.85);
+    --wire-active: rgba(26,122,58,1.0);
+  }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
     background: var(--bg);
@@ -519,6 +541,7 @@
     <div class="save-load-menu" id="loadMenu"></div>
   </div>
   <button class="toolbar-btn" id="clearBtn" title="Wipe canvas and start over">Clear</button>
+  <button class="toolbar-btn" id="themeBtn" title="Toggle light / dark mode">Light</button>
   <div class="toolbar-sep"></div>
   <button class="toolbar-btn play" id="playBtn">Activate</button>
 </div>
@@ -5063,6 +5086,27 @@ document.getElementById('clearBtn').addEventListener('click', function(e) {
   createDefaultPatch();
 });
 
+// Theme toggle (persisted in localStorage)
+var themeBtn = document.getElementById('themeBtn');
+function applyTheme(mode) {
+  if (mode === 'light') {
+    document.body.classList.add('light');
+    themeBtn.textContent = 'Dark';
+  } else {
+    document.body.classList.remove('light');
+    themeBtn.textContent = 'Light';
+  }
+}
+try {
+  applyTheme(localStorage.getItem('grainfield-theme') || 'dark');
+} catch(e) { applyTheme('dark'); }
+themeBtn.addEventListener('click', function(e) {
+  e.stopPropagation();
+  var next = document.body.classList.contains('light') ? 'dark' : 'light';
+  applyTheme(next);
+  try { localStorage.setItem('grainfield-theme', next); } catch(e) {}
+});
+
 // ─── PARTICLES (curiosity reward) ───
 function spawnConnectParticles(x, y) {
   for (var i = 0; i < 8; i++) {
@@ -5128,7 +5172,12 @@ function updateParticles() {
       for (var j = 0; j < fbc; j++) sum += _analyserBuf[j];
       var avg = sum / fbc / 255;
       var glow = avg > 0.5 ? 1 : avg * 2;
-      n.el.style.boxShadow = '0 0 ' + (10 + glow*30) + 'px rgba(139,171,144,' + (glow*0.3).toFixed(2) + ')';
+      // Light mode uses a darker, more saturated glow color since a faint
+      // pastel halo is invisible on a white background.
+      var glowColor = document.body.classList.contains('light')
+        ? '26,122,58'
+        : '139,171,144';
+      n.el.style.boxShadow = '0 0 ' + (10 + glow*30) + 'px rgba(' + glowColor + ',' + (glow*0.3).toFixed(2) + ')';
     }
   } else if (!isPlaying && _lastGlowState) {
     for (var nj = 0; nj < nodes.length; nj++) {
