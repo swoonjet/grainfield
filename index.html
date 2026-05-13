@@ -765,7 +765,7 @@ var NODE_DEFS = {
   loopstation: {
     category: 'Process', title: 'Loop Station', inputs: ['audio'], outputs: ['audio'],
     params: {
-      masterGain: 0.9,
+      masterGain: 0.9, thruGain: 1.0,
       trackGain0: 0.8, trackGain1: 0.8, trackGain2: 0.8, trackGain3: 0.8
     }
   },
@@ -1693,6 +1693,14 @@ function buildNodeAudio(node) {
     var input = audioCtx.createGain();
     var output = audioCtx.createGain();
     output.gain.value = node.params.masterGain == null ? 0.9 : node.params.masterGain;
+    // Live "thru" — what's being played through the loop station is also
+    // routed straight to the output so the performer can hear themselves
+    // alongside the recorded loops. Without this the capturer would record
+    // silently and you'd only hear playback.
+    var thru = audioCtx.createGain();
+    thru.gain.value = node.params.thruGain == null ? 1.0 : node.params.thruGain;
+    input.connect(thru);
+    thru.connect(output);
     var tracks = [];
     for (var i = 0; i < 4; i++) {
       var tg = audioCtx.createGain();
@@ -1711,7 +1719,7 @@ function buildNodeAudio(node) {
     capturer.connect(silentDest);
     silentDest.connect(audioCtx.destination);
     node.audio = {
-      type: 'loopstation', input: input, output: output,
+      type: 'loopstation', input: input, output: output, thru: thru,
       capturer: capturer, silentDest: silentDest,
       tracks: tracks, loopLength: 0  // in samples; 0 = not yet established
     };
@@ -1911,6 +1919,7 @@ function destroyNodeAudio(node) {
     try { node.audio.capturer.onaudioprocess = null; } catch(e) {}
     try { node.audio.capturer.disconnect(); } catch(e) {}
     try { node.audio.silentDest.disconnect(); } catch(e) {}
+    if (node.audio.thru) try { node.audio.thru.disconnect(); } catch(e) {}
     if (node.audio.tracks) node.audio.tracks.forEach(function(t) {
       if (t.sourceNode) {
         try { t.sourceNode.stop(); } catch(e) {}
@@ -4220,6 +4229,7 @@ function renderNode(node) {
       html += '</div>';
     }
     html += '</div>';
+    html += slider(node, 'thruGain', 'Thru', 0, 1, 0.01, 'f2');
     html += slider(node, 'masterGain', 'Master', 0, 1, 0.01, 'f2');
   }
   else if (node.type === 'modmatrix') {
@@ -4379,6 +4389,9 @@ function renderNode(node) {
         if (param === 'volume' && node.audio.input) node.audio.input.gain.setTargetAtTime(val, audioCtx.currentTime, 0.05);
         if (param === 'masterGain' && node.audio.type === 'loopstation' && node.audio.output) {
           node.audio.output.gain.setTargetAtTime(val, audioCtx.currentTime, 0.03);
+        }
+        if (param === 'thruGain' && node.audio.type === 'loopstation' && node.audio.thru) {
+          node.audio.thru.gain.setTargetAtTime(val, audioCtx.currentTime, 0.03);
         }
         // Oscillator live pitch
         if (param === 'pitch' && node.audio && node.audio.type === 'oscillator' && node.audio.osc) {
