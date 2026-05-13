@@ -486,6 +486,39 @@
   .strudel-status.error { color: var(--warn); }
   .strudel-status.playing { color: var(--active); }
   .strudel-status.loading { color: var(--accent); }
+
+  /* ─── LOOP STATION ─── */
+  .loop-tracks { display: flex; flex-direction: column; gap: 5px; margin: 6px 0 4px; }
+  .loop-track {
+    display: grid; grid-template-columns: 1fr 70px 22px;
+    gap: 6px; align-items: center;
+  }
+  .loop-track-btn {
+    background: var(--bg); color: var(--dim);
+    border: 1.5px solid var(--border); border-radius: 4px;
+    font-family: var(--mono); font-size: 10px; letter-spacing: 1px;
+    text-transform: uppercase; padding: 6px 8px; cursor: pointer;
+    text-align: left; transition: all 0.12s;
+  }
+  .loop-track-btn:hover { border-color: var(--ghost); color: var(--text); }
+  .loop-track-btn[data-state="recording"] {
+    border-color: var(--warn); color: var(--warn);
+    animation: recordPulse 1.2s ease-out infinite;
+  }
+  .loop-track-btn[data-state="playing"] {
+    border-color: var(--active); color: var(--active); background: var(--active-dim);
+  }
+  .loop-track-btn[data-state="stopped"] {
+    border-color: var(--ghost); color: var(--ghost);
+  }
+  .loop-track-vol { width: 100%; margin: 0; }
+  .loop-track-clear {
+    background: transparent; color: var(--ghost);
+    border: 1px solid var(--border); border-radius: 3px;
+    cursor: pointer; font-size: 12px; line-height: 1; padding: 0;
+    width: 22px; height: 22px;
+  }
+  .loop-track-clear:hover { color: var(--warn); border-color: var(--warn); }
 </style>
 </head>
 <body>
@@ -524,6 +557,7 @@
       <div class="add-menu-item" data-type="harmonics"><span class="item-name">Harmonics</span><span class="item-desc">partials</span></div>
       <div class="add-menu-item" data-type="compressor"><span class="item-name">Compressor</span><span class="item-desc">dynamics</span></div>
       <div class="add-menu-item" data-type="ringmod"><span class="item-name">Ring Mod</span><span class="item-desc">metallic</span></div>
+      <div class="add-menu-item" data-type="loopstation"><span class="item-name">Loop Station</span><span class="item-desc">4-track looper</span></div>
       <div class="add-menu-divider"></div>
       <div class="add-menu-cat">Effects</div>
       <div class="add-menu-item" data-type="reverb"><span class="item-name">Reverb</span><span class="item-desc">space</span></div>
@@ -727,6 +761,13 @@ var NODE_DEFS = {
   strudel: {
     category: 'Source', title: 'Strudel', inputs: [], outputs: ['audio'],
     params: { code: 'samples(\'github:tidalcycles/dirt-samples\')\n\nstack(\n  s("bd*4"),\n  s("~ cp ~ cp"),\n  s("hh*8").gain(0.35),\n  s("[~ oh]*4").gain(0.45)\n).cpm(118/4)' }
+  },
+  loopstation: {
+    category: 'Process', title: 'Loop Station', inputs: ['audio'], outputs: ['audio'],
+    params: {
+      masterGain: 0.9,
+      trackGain0: 0.8, trackGain1: 0.8, trackGain2: 0.8, trackGain3: 0.8
+    }
   },
   mixer: {
     category: 'Utility', title: 'Mixer', inputs: ['audio'], outputs: ['audio'],
@@ -1645,6 +1686,64 @@ function buildNodeAudio(node) {
     src.start();
     node.audio = { type: 'smoothlfo', src: src, output: depthGain, depthGain: depthGain };
   }
+  else if (t === 'loopstation') {
+    // 4-track looper with auto-sync. First recording establishes the loop
+    // length; later recordings auto-stop at the same length so everything
+    // stays in phase. Each track owns its own buffer + bufferSource + gain.
+    var input = audioCtx.createGain();
+    var output = audioCtx.createGain();
+    output.gain.value = node.params.masterGain == null ? 0.9 : node.params.masterGain;
+    var tracks = [];
+    for (var i = 0; i < 4; i++) {
+      var tg = audioCtx.createGain();
+      tg.gain.value = node.params['trackGain' + i] == null ? 0.8 : node.params['trackGain' + i];
+      tg.connect(output);
+      tracks.push({
+        state: 'empty', buffer: null, sourceNode: null, gainNode: tg,
+        chunks: [], frames: 0, _autoStopScheduled: false
+      });
+    }
+    var bufferSize = 2048;
+    var capturer = audioCtx.createScriptProcessor(bufferSize, 1, 1);
+    var silentDest = audioCtx.createGain();
+    silentDest.gain.value = 0;
+    input.connect(capturer);
+    capturer.connect(silentDest);
+    silentDest.connect(audioCtx.destination);
+    node.audio = {
+      type: 'loopstation', input: input, output: output,
+      capturer: capturer, silentDest: silentDest,
+      tracks: tracks, loopLength: 0  // in samples; 0 = not yet established
+    };
+    // Closure on node so the audio-thread callback can resolve indices.
+    capturer.onaudioprocess = function(ev) {
+      var inData = ev.inputBuffer.getChannelData(0);
+      // Silent passthrough — the capturer's outgoing connection goes nowhere.
+      var outData = ev.outputBuffer.getChannelData(0);
+      for (var k = 0; k < inData.length; k++) outData[k] = 0;
+      if (!node.audio || !node.audio.tracks) return;
+      var ll = node.audio.loopLength;
+      for (var ti = 0; ti < node.audio.tracks.length; ti++) {
+        var t = node.audio.tracks[ti];
+        if (t.state !== 'recording') continue;
+        var room = ll > 0 ? Math.max(0, ll - t.frames) : inData.length;
+        var n = Math.min(inData.length, room);
+        if (n > 0) {
+          var chunk = new Float32Array(n);
+          for (var i = 0; i < n; i++) chunk[i] = inData[i];
+          t.chunks.push(chunk);
+          t.frames += n;
+        }
+        if (ll > 0 && t.frames >= ll && !t._autoStopScheduled) {
+          t._autoStopScheduled = true;
+          // Schedule finalize on the main thread.
+          (function(idx) {
+            requestAnimationFrame(function() { finishLoopRecording(node, idx); });
+          })(ti);
+        }
+      }
+    };
+  }
   else if (t === 'modmatrix') {
     var input = audioCtx.createGain();
     input.gain.value = 1.0;
@@ -1807,6 +1906,18 @@ function destroyNodeAudio(node) {
     try { node.audio.capturer.disconnect(); } catch(e) {}
     try { node.audio.silentDest.disconnect(); } catch(e) {}
     if (node.audio.input) try { node.audio.input.disconnect(); } catch(e) {}
+  }
+  if (node.audio.type === 'loopstation') {
+    try { node.audio.capturer.onaudioprocess = null; } catch(e) {}
+    try { node.audio.capturer.disconnect(); } catch(e) {}
+    try { node.audio.silentDest.disconnect(); } catch(e) {}
+    if (node.audio.tracks) node.audio.tracks.forEach(function(t) {
+      if (t.sourceNode) {
+        try { t.sourceNode.stop(); } catch(e) {}
+        try { t.sourceNode.disconnect(); } catch(e) {}
+      }
+      try { t.gainNode.disconnect(); } catch(e) {}
+    });
   }
   if (node.audio.type === 'modmatrix') {
     stopModMatrixPoll(node);
@@ -3593,6 +3704,112 @@ function stopWaveTableSource(node) {
   node.audio.started = false;
 }
 
+// ─── LOOP STATION ENGINE ───
+function loopTrackClick(node, idx) {
+  if (!node.audio || node.audio.type !== 'loopstation') return;
+  var t = node.audio.tracks[idx];
+  if (!t) return;
+  if (t.state === 'empty') {
+    // Begin capturing input into this track's chunks.
+    t.chunks = [];
+    t.frames = 0;
+    t._autoStopScheduled = false;
+    t.state = 'recording';
+  } else if (t.state === 'recording') {
+    finishLoopRecording(node, idx);
+  } else if (t.state === 'playing') {
+    // Mute (keep buffer); the bufferSource keeps looping but gain goes to 0.
+    t.state = 'stopped';
+    try { t.gainNode.gain.setTargetAtTime(0, audioCtx.currentTime, 0.01); } catch(e) {}
+  } else if (t.state === 'stopped') {
+    t.state = 'playing';
+    var g = node.params['trackGain' + idx];
+    if (g == null) g = 0.8;
+    try { t.gainNode.gain.setTargetAtTime(g, audioCtx.currentTime, 0.01); } catch(e) {}
+  }
+  renderLoopStationTrack(node, idx);
+}
+
+function finishLoopRecording(node, idx) {
+  if (!node.audio || node.audio.type !== 'loopstation') return;
+  var t = node.audio.tracks[idx];
+  if (!t || t.state !== 'recording') return;
+  if (t.frames === 0) {
+    t.state = 'empty';
+    renderLoopStationTrack(node, idx);
+    return;
+  }
+  var samples = node.audio.loopLength > 0 ? node.audio.loopLength : t.frames;
+  // Master track defines loopLength for the whole node.
+  if (node.audio.loopLength === 0) node.audio.loopLength = samples;
+  var buf = audioCtx.createBuffer(1, samples, audioCtx.sampleRate);
+  var data = buf.getChannelData(0);
+  var off = 0;
+  for (var c = 0; c < t.chunks.length && off < samples; c++) {
+    var chunk = t.chunks[c];
+    for (var i = 0; i < chunk.length && off < samples; i++) data[off++] = chunk[i];
+  }
+  t.buffer = buf;
+  t.chunks = [];
+  t.frames = 0;
+  t._autoStopScheduled = false;
+  startLoopTrackPlayback(node, idx);
+  t.state = 'playing';
+  renderLoopStationTrack(node, idx);
+}
+
+function startLoopTrackPlayback(node, idx) {
+  var t = node.audio.tracks[idx];
+  if (!t || !t.buffer) return;
+  if (t.sourceNode) {
+    try { t.sourceNode.stop(); } catch(e) {}
+    try { t.sourceNode.disconnect(); } catch(e) {}
+  }
+  var src = audioCtx.createBufferSource();
+  src.buffer = t.buffer;
+  src.loop = true;
+  src.connect(t.gainNode);
+  src.start();
+  t.sourceNode = src;
+  // Restore gain in case it was muted.
+  var g = node.params['trackGain' + idx];
+  if (g == null) g = 0.8;
+  try { t.gainNode.gain.setTargetAtTime(g, audioCtx.currentTime, 0.005); } catch(e) {}
+}
+
+function clearLoopTrack(node, idx) {
+  if (!node.audio || node.audio.type !== 'loopstation') return;
+  var t = node.audio.tracks[idx];
+  if (!t) return;
+  if (t.sourceNode) {
+    try { t.sourceNode.stop(); } catch(e) {}
+    try { t.sourceNode.disconnect(); } catch(e) {}
+    t.sourceNode = null;
+  }
+  t.buffer = null;
+  t.chunks = [];
+  t.frames = 0;
+  t.state = 'empty';
+  t._autoStopScheduled = false;
+  // If no tracks have content, reset loopLength so the next recording can
+  // establish a new tempo.
+  var anyContent = node.audio.tracks.some(function(x) { return x.buffer != null; });
+  if (!anyContent) node.audio.loopLength = 0;
+  renderLoopStationTrack(node, idx);
+}
+
+function renderLoopStationTrack(node, idx) {
+  if (!node.el) return;
+  var row = node.el.querySelector('.loop-track[data-idx="' + idx + '"]');
+  if (!row) return;
+  var btn = row.querySelector('.loop-track-btn');
+  var t = node.audio && node.audio.tracks ? node.audio.tracks[idx] : null;
+  var state = t ? t.state : 'empty';
+  btn.dataset.state = state;
+  var labels = { empty: '● Rec', recording: '■ Recording', playing: '▶ Playing', stopped: '⏸ Stopped' };
+  btn.textContent = labels[state] || state;
+}
+
 function startOscSource(node) {
   if (!node.audio || node.audio.type !== 'oscillator') return;
   if (node.audio.started) return;
@@ -3993,6 +4210,18 @@ function renderNode(node) {
     html += '</div>';
     html += '<div class="strudel-status">idle</div>';
   }
+  else if (node.type === 'loopstation') {
+    html += '<div class="loop-tracks">';
+    for (var li = 0; li < 4; li++) {
+      html += '<div class="loop-track" data-idx="' + li + '">';
+      html += '<button class="loop-track-btn" data-idx="' + li + '" data-state="empty">● Rec</button>';
+      html += '<input type="range" min="0" max="1" step="0.01" value="' + (node.params['trackGain' + li] == null ? 0.8 : node.params['trackGain' + li]) + '" data-idx="' + li + '" class="loop-track-vol" title="Volume">';
+      html += '<button class="loop-track-clear" data-idx="' + li + '" title="Clear track">&times;</button>';
+      html += '</div>';
+    }
+    html += '</div>';
+    html += slider(node, 'masterGain', 'Master', 0, 1, 0.01, 'f2');
+  }
   else if (node.type === 'modmatrix') {
     html += '<div class="mm-mini-label">Target Node</div>';
     html += '<select class="mm-select" data-mm="target"></select>';
@@ -4148,6 +4377,9 @@ function renderNode(node) {
       // Live audio
       if (isPlaying && node.audio) {
         if (param === 'volume' && node.audio.input) node.audio.input.gain.setTargetAtTime(val, audioCtx.currentTime, 0.05);
+        if (param === 'masterGain' && node.audio.type === 'loopstation' && node.audio.output) {
+          node.audio.output.gain.setTargetAtTime(val, audioCtx.currentTime, 0.03);
+        }
         // Oscillator live pitch
         if (param === 'pitch' && node.audio && node.audio.type === 'oscillator' && node.audio.osc) {
           node.audio.osc.frequency.setTargetAtTime(val, audioCtx.currentTime, 0.05);
@@ -4391,6 +4623,11 @@ function renderNode(node) {
   // Strudel: textarea + eval/stop
   if (node.type === 'strudel') {
     bindStrudelNode(node, el);
+  }
+
+  // Loop Station: per-track Rec/Play/Stop + volume + clear
+  if (node.type === 'loopstation') {
+    bindLoopStationNode(node, el);
   }
 
   // Click to select
@@ -4785,6 +5022,48 @@ function bindStrudelNode(node, el) {
   });
 }
 
+function bindLoopStationNode(node, el) {
+  // Big rec/play/stop button per track
+  el.querySelectorAll('.loop-track-btn').forEach(function(btn) {
+    btn.addEventListener('mousedown', function(e) { e.stopPropagation(); });
+    btn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      // Make sure audio is running — recording is meaningless otherwise.
+      if (!isPlaying) togglePlay();
+      if (!node.audio) buildNodeAudio(node);
+      var idx = parseInt(btn.dataset.idx);
+      loopTrackClick(node, idx);
+    });
+  });
+  // Per-track volume slider
+  el.querySelectorAll('.loop-track-vol').forEach(function(sl) {
+    sl.addEventListener('mousedown', function(e) { e.stopPropagation(); });
+    sl.addEventListener('input', function(e) {
+      e.stopPropagation();
+      var idx = parseInt(sl.dataset.idx);
+      var val = parseFloat(sl.value);
+      node.params['trackGain' + idx] = val;
+      if (node.audio && node.audio.tracks && node.audio.tracks[idx]) {
+        var t = node.audio.tracks[idx];
+        // Only push to AudioParam if the track isn't muted/stopped.
+        if (t.state !== 'stopped') {
+          try { t.gainNode.gain.setTargetAtTime(val, audioCtx.currentTime, 0.01); } catch(e) {}
+        }
+      }
+      scheduleAutoSave();
+    });
+  });
+  // Clear button per track
+  el.querySelectorAll('.loop-track-clear').forEach(function(b) {
+    b.addEventListener('mousedown', function(e) { e.stopPropagation(); });
+    b.addEventListener('click', function(e) {
+      e.stopPropagation();
+      var idx = parseInt(b.dataset.idx);
+      clearLoopTrack(node, idx);
+    });
+  });
+}
+
 function bindModMatrixNode(node, el) {
   populateMmTargets(node, el);
   populateMmParams(node, el);
@@ -5053,6 +5332,7 @@ canvasEl.addEventListener('contextmenu', function(e) {
       { label: 'Harmonics', action: function() { createNode('harmonics', cp.x, cp.y); }},
       { label: 'Compressor', action: function() { createNode('compressor', cp.x, cp.y); }},
       { label: 'Ring Mod', action: function() { createNode('ringmod', cp.x, cp.y); }},
+      { label: 'Loop Station', action: function() { createNode('loopstation', cp.x, cp.y); }},
       { label: 'Reverb', action: function() { createNode('reverb', cp.x, cp.y); }},
       { label: 'Delay', action: function() { createNode('delay', cp.x, cp.y); }},
       { label: 'Chorus', action: function() { createNode('chorus', cp.x, cp.y); }},
