@@ -766,6 +766,7 @@ var NODE_DEFS = {
     category: 'Process', title: 'Loop Station', inputs: ['audio'], outputs: ['audio'],
     params: {
       masterGain: 0.9, thruGain: 1.0,
+      bpm: 120, bars: 4, clickOn: false, clickGain: 0.45,
       trackGain0: 0.8, trackGain1: 0.8, trackGain2: 0.8, trackGain3: 0.8
     }
   },
@@ -1718,11 +1719,23 @@ function buildNodeAudio(node) {
     input.connect(capturer);
     capturer.connect(silentDest);
     silentDest.connect(audioCtx.destination);
+    // Click gain — short percussive tones written here go straight to output,
+    // bypassing the capturer so the click never gets recorded into a track.
+    var clickGain = audioCtx.createGain();
+    clickGain.gain.value = node.params.clickGain == null ? 0.45 : node.params.clickGain;
+    clickGain.connect(output);
+    // Pre-set the canonical loop length from the BPM × bars params so every
+    // recording auto-stops at the same tempo-locked boundary.
+    var bpm = node.params.bpm || 120;
+    var bars = node.params.bars || 4;
+    var initialLoopLength = Math.round((bars * 4 / bpm) * 60 * audioCtx.sampleRate);
     node.audio = {
       type: 'loopstation', input: input, output: output, thru: thru,
       capturer: capturer, silentDest: silentDest,
-      tracks: tracks, loopLength: 0  // in samples; 0 = not yet established
+      clickGain: clickGain, clickIntervalId: null, clickBeat: 0,
+      tracks: tracks, loopLength: initialLoopLength
     };
+    if (node.params.clickOn) startLoopClick(node);
     // Closure on node so the audio-thread callback can resolve indices.
     capturer.onaudioprocess = function(ev) {
       var inData = ev.inputBuffer.getChannelData(0);
@@ -1916,10 +1929,12 @@ function destroyNodeAudio(node) {
     if (node.audio.input) try { node.audio.input.disconnect(); } catch(e) {}
   }
   if (node.audio.type === 'loopstation') {
+    stopLoopClick(node);
     try { node.audio.capturer.onaudioprocess = null; } catch(e) {}
     try { node.audio.capturer.disconnect(); } catch(e) {}
     try { node.audio.silentDest.disconnect(); } catch(e) {}
     if (node.audio.thru) try { node.audio.thru.disconnect(); } catch(e) {}
+    if (node.audio.clickGain) try { node.audio.clickGain.disconnect(); } catch(e) {}
     if (node.audio.tracks) node.audio.tracks.forEach(function(t) {
       if (t.sourceNode) {
         try { t.sourceNode.stop(); } catch(e) {}
@@ -3800,11 +3815,63 @@ function clearLoopTrack(node, idx) {
   t.frames = 0;
   t.state = 'empty';
   t._autoStopScheduled = false;
-  // If no tracks have content, reset loopLength so the next recording can
-  // establish a new tempo.
-  var anyContent = node.audio.tracks.some(function(x) { return x.buffer != null; });
-  if (!anyContent) node.audio.loopLength = 0;
+  // loopLength stays locked to the current BPM × bars setting — clearing
+  // tracks doesn't reset tempo. Change BPM or bars to change loop length.
   renderLoopStationTrack(node, idx);
+}
+
+function recomputeLoopLength(node) {
+  if (!node.audio || node.audio.type !== 'loopstation') return;
+  var bpm = node.params.bpm || 120;
+  var bars = node.params.bars || 4;
+  node.audio.loopLength = Math.round((bars * 4 / bpm) * 60 * audioCtx.sampleRate);
+}
+
+function startLoopClick(node) {
+  if (!node.audio || node.audio.type !== 'loopstation') return;
+  if (node.audio.clickIntervalId) return;
+  node.audio.clickBeat = 0;
+  var bpm = node.params.bpm || 120;
+  var intervalMs = (60 / bpm) * 1000;
+  function tick() {
+    if (!node.audio || !audioCtx) return;
+    var beatsPerBar = 4;
+    var totalBeats = (node.params.bars || 4) * beatsPerBar;
+    var isDownbeat = (node.audio.clickBeat % beatsPerBar) === 0;
+    spawnClickTone(node, isDownbeat);
+    node.audio.clickBeat = (node.audio.clickBeat + 1) % totalBeats;
+  }
+  tick(); // immediate first beat
+  node.audio.clickIntervalId = setInterval(tick, intervalMs);
+}
+
+function stopLoopClick(node) {
+  if (!node.audio || node.audio.type !== 'loopstation') return;
+  if (node.audio.clickIntervalId) {
+    clearInterval(node.audio.clickIntervalId);
+    node.audio.clickIntervalId = null;
+  }
+}
+
+function spawnClickTone(node, isDownbeat) {
+  if (!audioCtx || !node.audio || !node.audio.clickGain) return;
+  var now = audioCtx.currentTime;
+  var osc = audioCtx.createOscillator();
+  osc.type = 'sine';
+  osc.frequency.value = isDownbeat ? 1600 : 1000;
+  var env = audioCtx.createGain();
+  var peak = isDownbeat ? 0.6 : 0.4;
+  env.gain.setValueAtTime(0, now);
+  env.gain.linearRampToValueAtTime(peak, now + 0.001);
+  env.gain.exponentialRampToValueAtTime(0.0001, now + 0.05);
+  osc.connect(env);
+  env.connect(node.audio.clickGain);
+  osc.start(now);
+  osc.stop(now + 0.06);
+  osc.onended = function() {
+    try { osc.disconnect(); } catch(e) {}
+    try { env.disconnect(); } catch(e) {}
+  };
 }
 
 function renderLoopStationTrack(node, idx) {
@@ -3901,6 +3968,10 @@ function togglePlay() {
     nodes.forEach(function(n) { if (!n.audio) buildNodeAudio(n); });
     isPlaying = true;
     connectAudio();
+    // Restart any loop-station click that was on before deactivation.
+    nodes.forEach(function(n) {
+      if (n.audio && n.audio.type === 'loopstation' && n.params.clickOn) startLoopClick(n);
+    });
   } else {
     isPlaying = false;
     nodes.forEach(function(n) {
@@ -3915,6 +3986,7 @@ function togglePlay() {
       if (n.audio && n.audio.type === 'sequencer') stopSequencer(n);
       if (n.audio && n.audio.type === 'grainseq') stopGrainSeq(n);
       if (n.audio && n.audio.type === 'keyboard') stopAllKeyboardVoices(n);
+      if (n.audio && n.audio.type === 'loopstation') stopLoopClick(n);
       // Nodes with persistent internal sources or self-oscillating feedback:
       // tear down completely so the activate path rebuilds them fresh.
       if (n.audio && (n.audio.type === 'smoothlfo' || n.audio.type === 'wowflutter' || n.audio.type === 'ladder')) {
@@ -4229,6 +4301,10 @@ function renderNode(node) {
       html += '</div>';
     }
     html += '</div>';
+    html += slider(node, 'bpm', 'BPM', 40, 240, 1, 'i');
+    html += slider(node, 'bars', 'Bars', 1, 16, 1, 'i');
+    html += waveButtons(node, [true, false], ['Click On', 'Click Off'], 'clickOn');
+    html += slider(node, 'clickGain', 'Click Vol', 0, 1, 0.01, 'f2');
     html += slider(node, 'thruGain', 'Thru', 0, 1, 0.01, 'f2');
     html += slider(node, 'masterGain', 'Master', 0, 1, 0.01, 'f2');
   }
@@ -4358,6 +4434,10 @@ function renderNode(node) {
         if (paramName === 'shape' && node.audio && node.audio.type === 'smoothlfo') {
           rebuildSmoothLfo(node);
         }
+        if (paramName === 'clickOn' && node.audio && node.audio.type === 'loopstation') {
+          if (node.params.clickOn) startLoopClick(node);
+          else stopLoopClick(node);
+        }
         if (paramName === 'harmony' && node.audio && node.audio.type === 'grainchoir') {
           // Harmony change — restart engine to apply new intervals
           connectAudio();
@@ -4392,6 +4472,15 @@ function renderNode(node) {
         }
         if (param === 'thruGain' && node.audio.type === 'loopstation' && node.audio.thru) {
           node.audio.thru.gain.setTargetAtTime(val, audioCtx.currentTime, 0.03);
+        }
+        if (node.audio.type === 'loopstation') {
+          if (param === 'bpm' || param === 'bars') {
+            recomputeLoopLength(node);
+            if (node.audio.clickIntervalId) { stopLoopClick(node); startLoopClick(node); }
+          }
+          if (param === 'clickGain' && node.audio.clickGain) {
+            node.audio.clickGain.gain.setTargetAtTime(val, audioCtx.currentTime, 0.02);
+          }
         }
         // Oscillator live pitch
         if (param === 'pitch' && node.audio && node.audio.type === 'oscillator' && node.audio.osc) {
