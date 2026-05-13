@@ -501,6 +501,10 @@
     text-align: left; transition: all 0.12s;
   }
   .loop-track-btn:hover { border-color: var(--ghost); color: var(--text); }
+  .loop-track-btn[data-state="arming"] {
+    border-color: var(--accent); color: var(--accent);
+    animation: recordPulse 0.6s ease-out infinite;
+  }
   .loop-track-btn[data-state="recording"] {
     border-color: var(--warn); color: var(--warn);
     animation: recordPulse 1.2s ease-out infinite;
@@ -3734,11 +3738,22 @@ function loopTrackClick(node, idx) {
   var t = node.audio.tracks[idx];
   if (!t) return;
   if (t.state === 'empty') {
-    // Begin capturing input into this track's chunks.
-    t.chunks = [];
-    t.frames = 0;
-    t._autoStopScheduled = false;
-    t.state = 'recording';
+    if (node.audio.clickIntervalId) {
+      // Click is running — arm and wait one full bar of click before recording
+      // actually begins. Gives the performer a count-in.
+      t.state = 'arming';
+      t.armingBeatsLeft = 4; // standard 4-beat bar
+    } else {
+      // No click — start recording immediately.
+      t.chunks = [];
+      t.frames = 0;
+      t._autoStopScheduled = false;
+      t.state = 'recording';
+    }
+  } else if (t.state === 'arming') {
+    // Cancel the pending count-in.
+    t.state = 'empty';
+    t.armingBeatsLeft = null;
   } else if (t.state === 'recording') {
     finishLoopRecording(node, idx);
   } else if (t.state === 'playing') {
@@ -3839,6 +3854,23 @@ function startLoopClick(node) {
     var totalBeats = (node.params.bars || 4) * beatsPerBar;
     var isDownbeat = (node.audio.clickBeat % beatsPerBar) === 0;
     spawnClickTone(node, isDownbeat);
+    // Advance any 'arming' tracks — decrement their count-in beats, and when
+    // a track reaches zero, transition to 'recording' on the next downbeat.
+    if (node.audio.tracks) {
+      node.audio.tracks.forEach(function(t, ti) {
+        if (t.state !== 'arming') return;
+        if (t.armingBeatsLeft == null) t.armingBeatsLeft = beatsPerBar;
+        t.armingBeatsLeft -= 1;
+        if (t.armingBeatsLeft <= 0) {
+          t.chunks = [];
+          t.frames = 0;
+          t._autoStopScheduled = false;
+          t.state = 'recording';
+          t.armingBeatsLeft = null;
+        }
+        renderLoopStationTrack(node, ti);
+      });
+    }
     node.audio.clickBeat = (node.audio.clickBeat + 1) % totalBeats;
   }
   tick(); // immediate first beat
@@ -3882,8 +3914,13 @@ function renderLoopStationTrack(node, idx) {
   var t = node.audio && node.audio.tracks ? node.audio.tracks[idx] : null;
   var state = t ? t.state : 'empty';
   btn.dataset.state = state;
-  var labels = { empty: '● Rec', recording: '■ Recording', playing: '▶ Playing', stopped: '⏸ Stopped' };
-  btn.textContent = labels[state] || state;
+  if (state === 'arming') {
+    var n = t && t.armingBeatsLeft != null ? t.armingBeatsLeft : 0;
+    btn.textContent = n > 0 ? '■ Cue ' + n : '■ Arming…';
+  } else {
+    var labels = { empty: '● Rec', recording: '■ Recording', playing: '▶ Playing', stopped: '⏸ Stopped' };
+    btn.textContent = labels[state] || state;
+  }
 }
 
 function startOscSource(node) {
