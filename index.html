@@ -3885,6 +3885,21 @@ function stopLoopClick(node) {
   }
 }
 
+// Kill switch for recorded loop tracks. stopLoopClick only silences the
+// metronome -- each track's AudioBufferSourceNode has loop=true and keeps
+// looping (audibly, if unmuted) until told to stop. Buffers are preserved
+// so togglePlay's reactivate path can recreate playback afterward.
+function stopLoopStationTracks(node) {
+  if (!node.audio || node.audio.type !== 'loopstation' || !node.audio.tracks) return;
+  node.audio.tracks.forEach(function(t) {
+    if (t.sourceNode) {
+      try { t.sourceNode.stop(); } catch(e) {}
+      try { t.sourceNode.disconnect(); } catch(e) {}
+      t.sourceNode = null;
+    }
+  });
+}
+
 function spawnClickTone(node, isDownbeat) {
   if (!audioCtx || !node.audio || !node.audio.clickGain) return;
   var now = audioCtx.currentTime;
@@ -4005,9 +4020,24 @@ function togglePlay() {
     nodes.forEach(function(n) { if (!n.audio) buildNodeAudio(n); });
     isPlaying = true;
     connectAudio();
-    // Restart any loop-station click that was on before deactivation.
+    // Restart any loop-station click that was on before deactivation, and
+    // resume recorded tracks -- deactivating now fully stops their looping
+    // sourceNode, so it must be recreated from the saved buffer.
     nodes.forEach(function(n) {
       if (n.audio && n.audio.type === 'loopstation' && n.params.clickOn) startLoopClick(n);
+      if (n.audio && n.audio.type === 'loopstation' && n.audio.tracks) {
+        n.audio.tracks.forEach(function(t, idx) {
+          if (t.buffer && !t.sourceNode) {
+            startLoopTrackPlayback(n, idx);
+            if (t.state === 'stopped') {
+              try {
+                t.gainNode.gain.cancelScheduledValues(audioCtx.currentTime);
+                t.gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
+              } catch(e) {}
+            }
+          }
+        });
+      }
     });
   } else {
     isPlaying = false;
@@ -4023,10 +4053,10 @@ function togglePlay() {
       if (n.audio && n.audio.type === 'sequencer') stopSequencer(n);
       if (n.audio && n.audio.type === 'grainseq') stopGrainSeq(n);
       if (n.audio && n.audio.type === 'keyboard') stopAllKeyboardVoices(n);
-      if (n.audio && n.audio.type === 'loopstation') stopLoopClick(n);
+      if (n.audio && n.audio.type === 'loopstation') { stopLoopClick(n); stopLoopStationTracks(n); }
       // Nodes with persistent internal sources or self-oscillating feedback:
       // tear down completely so the activate path rebuilds them fresh.
-      if (n.audio && (n.audio.type === 'smoothlfo' || n.audio.type === 'wowflutter' || n.audio.type === 'ladder')) {
+      if (n.audio && (n.audio.type === 'smoothlfo' || n.audio.type === 'wowflutter' || n.audio.type === 'ladder' || n.audio.type === 'tapeloop')) {
         destroyNodeAudio(n);
         n.audio = null;
       }
